@@ -38,7 +38,7 @@ while game.agents and steps < MAX_STEPS:
         print(f"\n🏆 Winner: {agent}")
         break
 
-    time.sleep(0.4)
+    time.sleep(0.2)
 
 game.close()
 print("\nTest finished.")

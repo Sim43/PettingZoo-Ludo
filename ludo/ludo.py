@@ -180,8 +180,16 @@ class raw_env(AECEnv, EzPickle):
                     pieces.append((a, i))
         return pieces
 
+    def _is_any_block(self, pos):
+        """Return True if any player has a block (2+ pieces) on this main-track position."""
+        pieces = self._pieces_on_main(pos)
+        counts = {}
+        for a, _ in pieces:
+            counts[a] = counts.get(a, 0) + 1
+        return any(c >= 2 for c in counts.values())
+
     def _is_enemy_block(self, agent, pos):
-        """Check if a given main-track position has an enemy block (2+ pieces)."""
+        """Return True if an enemy has a block on this main-track position."""
         pieces = self._pieces_on_main(pos)
         counts = {}
         for a, _ in pieces:
@@ -207,9 +215,9 @@ class raw_env(AECEnv, EzPickle):
                 continue
 
             if zone == "yard" and self.current_dice == 6:
-                # Entering main track: blocked if enemy block or enemy on safe entry square
+                # Entering main track: blocked if any block or enemy on safe entry square
                 start = self.START_INDEX[self.agents.index(agent)]
-                blocked_entry = self._is_enemy_block(agent, start) or (
+                blocked_entry = self._is_any_block(start) or (
                     start in self.SAFE_SQUARES and self._is_enemy_occupied(agent, start)
                 )
                 if not blocked_entry:
@@ -218,14 +226,14 @@ class raw_env(AECEnv, EzPickle):
             elif zone == "main":
                 new_dist = self.distance[agent][i] + self.current_dice
                 if new_dist <= 51 + self.HOME_LEN:
-                    # Check path for enemy blocks / occupied safe squares (cannot land on or pass through)
+                    # Check path for any blocks / occupied safe squares (cannot land on or pass through)
                     blocked = False
                     for step in range(1, self.current_dice + 1):
                         dist = self.distance[agent][i] + step
                         if dist >= self.MAIN_TRACK_LEN:
                             break  # into home track, no more main squares
                         pos = (idx + step) % self.MAIN_TRACK_LEN
-                        if self._is_enemy_block(agent, pos):
+                        if self._is_any_block(pos):
                             blocked = True
                             break
                         if pos in self.SAFE_SQUARES and self._is_enemy_occupied(agent, pos):
@@ -353,6 +361,10 @@ class raw_env(AECEnv, EzPickle):
         if pos in self.SAFE_SQUARES:
             return False
 
+        # Any block (friendly or enemy) cannot be captured
+        if self._is_any_block(pos):
+            return False
+
         # Count opponent pieces on this square
         pieces = self._pieces_on_main(pos)
         counts = {}
@@ -367,11 +379,7 @@ class raw_env(AECEnv, EzPickle):
         if not counts:
             return False
 
-        # Blocks (2+ pieces of same opponent) cannot be captured
-        if any(c >= 2 for c in counts.values()):
-            return False
-
-        # Single opponent piece: capture it
+        # Single opponent piece: capture it (blocks already excluded above)
         for a, c in counts.items():
             if c == 1:
                 i = indices[a][0]
@@ -438,7 +446,25 @@ class raw_env(AECEnv, EzPickle):
 
                 screen_x = int(x * scale)
                 screen_y = int(y * scale)
-                self.screen.blit(piece_img, (screen_x - piece_offset_x, screen_y - piece_offset_y))
+                # Small deterministic offset only when multiple pieces share the same logical position
+                same_spot_count = 0
+                for a2 in self.agents:
+                    for _, (z2, idx2) in enumerate(self.piece_state[a2]):
+                        if z2 == zone and idx2 == idx:
+                            same_spot_count += 1
+                if same_spot_count > 1:
+                    stack_offset_x = (piece_idx % 2) * 6
+                    stack_offset_y = (piece_idx // 2) * 6
+                else:
+                    stack_offset_x = 0
+                    stack_offset_y = 0
+                self.screen.blit(
+                    piece_img,
+                    (
+                        screen_x - piece_offset_x + stack_offset_x,
+                        screen_y - piece_offset_y + stack_offset_y,
+                    ),
+                )
 
         if self.render_mode == "human":
             pygame.event.pump()
