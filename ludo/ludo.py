@@ -130,13 +130,9 @@ class raw_env(AECEnv, EzPickle):
 
         # 5 actions: move piece 0-3, 4 = PASS (only legal when no moves exist)
         self.action_spaces = {a: spaces.Discrete(5) for a in self.agents}
+        # Flattened observation: 75-element state vector + 5-element action mask
         self.observation_spaces = {
-            a: spaces.Dict(
-                {
-                    "observation": spaces.Box(0, 1, shape=(75,), dtype=np.float32),
-                    "action_mask": spaces.Box(0, 1, shape=(5,), dtype=np.int8),
-                }
-            )
+            a: spaces.Box(0.0, 1.0, shape=(80,), dtype=np.float32)
             for a in self.agents
         }
 
@@ -185,6 +181,7 @@ class raw_env(AECEnv, EzPickle):
     # ------------------------------------------------------------
 
     def observe(self, agent):
+        # Core state features
         obs = np.zeros(75, dtype=np.float32)
 
         # Main board occupancy
@@ -212,12 +209,18 @@ class raw_env(AECEnv, EzPickle):
         obs[68] = self.current_dice / 6.0
         obs[69] = 1.0 if agent == self.agent_selection else 0.0
 
+        # Action mask as a separate vector, then concatenated to the observation.
+        # Gymnasium's Discrete space expects mask dtype to be np.int8.
         action_mask = np.zeros(5, dtype=np.int8)
         if agent == self.agent_selection:
             for a in self._legal_actions(agent):
                 action_mask[a] = 1
 
-        return {"observation": obs, "action_mask": action_mask}
+        # Expose the action mask through info so TerminateIllegalWrapper can use it
+        self.infos[agent]["action_mask"] = action_mask
+
+        # Return a single flat numpy array to satisfy PettingZoo's preferred API
+        return np.concatenate([obs, action_mask.astype(np.float32)])
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -370,15 +373,26 @@ class raw_env(AECEnv, EzPickle):
             self.distance[agent][action] = 0
 
         elif zone == "main":
-            new_dist = self.distance[agent][action] + self.current_dice
+            # Move along the main track, then into the home track (if needed) in a single move.
+            # This prevents skipping the home entry or remaining on the main track after passing it.
+            current_dist = self.distance[agent][action]
+            roll = self.current_dice
+            new_dist = current_dist + roll
             self.distance[agent][action] = new_dist
 
-            if new_dist < 52:
-                new_pos = (idx + self.current_dice) % 52
+            if new_dist < self.MAIN_TRACK_LEN:
+                # Entire move stays on the main track.
+                new_pos = (idx + roll) % self.MAIN_TRACK_LEN
                 self.piece_state[agent][action] = ("main", new_pos)
                 capture = self._check_capture(agent, new_pos)
             else:
-                self.piece_state[agent][action] = ("home", new_dist - 52)
+                # The move crosses the home entry: consume remaining steps on the main track,
+                # then move the remainder inside the home track within this single move.
+                # Steps needed to reach the last main-track index (distance MAIN_TRACK_LEN - 1).
+                steps_to_entry = (self.MAIN_TRACK_LEN - 1) - current_dist
+                steps_in_home = roll - steps_to_entry - 1  # first step after entry is home index 0
+                # We don't perform captures on the entry square or inside home.
+                self.piece_state[agent][action] = ("home", steps_in_home)
 
         elif zone == "home":
             new_idx = idx + self.current_dice
@@ -508,7 +522,9 @@ class raw_env(AECEnv, EzPickle):
                 same_spot_count = 0
                 for a2 in self.agents:
                     for _, (z2, idx2) in enumerate(self.piece_state[a2]):
-                        if z2 == zone and idx2 == idx:
+                        # Only treat pieces as stacked when they share a well-defined logical position
+                        # (i.e., same zone and non-None index). This avoids offsets for distinct yard/finished pieces.
+                        if z2 == zone and idx2 is not None and idx2 == idx:
                             same_spot_count += 1
                 if same_spot_count > 1:
                     stack_offset_x = (piece_idx % 2) * 6

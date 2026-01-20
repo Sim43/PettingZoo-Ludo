@@ -16,9 +16,10 @@ while game.agents and steps < MAX_STEPS:
     agent = game.agent_selection
     obs = game.observe(agent)
 
-    mask = obs["action_mask"]
+    # Last 5 entries are the action mask, first 75 are the core observation
+    mask = obs[75:]
     legal = [i for i, v in enumerate(mask) if v == 1]
-    dice = int(obs["observation"][68] * 6)
+    dice = int(obs[68] * 6)
 
     print(f"\nAgent: {agent}")
     print(f"Dice: {dice}")
