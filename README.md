@@ -143,28 +143,11 @@ env.close()
 - **Truncations**:
   - Currently no built-in `max_cycles`; `truncations` remain `False` unless integrated into a higher-level wrapper.
 
-### Ludo-specific movement rules
+### Ludo-specific rules
 
-- **Starting from the yard**:
-  - A piece leaves the yard only on a roll of 6, entering the shared main track at a color-specific start index:
-    - **Green (`player_0`)**: main index **0**
-    - **Yellow (`player_1`)**: main index **13**
-    - **Blue (`player_2`)**: main index **26**
-    - **Red (`player_3`)**: main index **39**
-- **Last main-track square before home** (per color, encoded via distance from the color's start):
-  - **Green**: index **50**
-  - **Yellow**: index **11**
-  - **Blue**: index **24**
-  - **Red**: index **37**
-  - Any move that would go beyond this last main square automatically continues into the **home track in the same move**, so pieces never skip home entry or remain on the main track after passing it.
-- **Safe squares and blocks**:
-  - Certain main-track indices are **safe squares** where captures are not allowed.
-  - **Blocks**:
-    - In **free-for-all**, a block is two or more pieces of the **same player** on a main square.
-    - In **teams mode**, a block is two or more pieces from the **same team** on a main square (teammates can form team blocks).
-    - Blocks cannot be captured and also block passage for other pieces on non-safe squares.
-- **Captures**:
-  - Non-safe, non-blocked squares with exactly one opponent piece allow captures, sending that piece back to its yard.
+- This environment implements a slightly extended Ludo ruleset (including capture-before-home and team blocks) for both free-for-all and team modes.
+- For a complete, up-to-date description of all movement, capture, blocking, safe-square, and team rules, see the dedicated rules document:  
+  **[Detailed Ludo rules](LUDO_RULES.md)**
 
 ---
 

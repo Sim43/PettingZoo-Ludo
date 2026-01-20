@@ -221,6 +221,10 @@ class raw_env(AECEnv, EzPickle):
         # Track consecutive sixes per player for three-sixes penalty
         self.consecutive_sixes = {a: 0 for a in self.agents}
 
+        # Track whether each colour (agent) has captured at least one enemy piece.
+        # This gates home entry per colour in both FFA and teams modes.
+        self.has_captured = {a: False for a in self.agents}
+
         # Roll dice for the first agent so there is always an active dice value
         self._roll_new_dice()
 
@@ -414,18 +418,14 @@ class raw_env(AECEnv, EzPickle):
                     legal.append(i)
 
             elif zone == "main":
-                new_dist = self.distance[check_agent][i] + self.current_dice
-                # Maximum total distance: last main square (distance MAIN_TRACK_LEN - 2)
-                # plus reachable home track (indices 0 .. HOME_LEN-1).
-                if new_dist <= (self.MAIN_TRACK_LEN - 2) + (self.HOME_LEN - 1):
-                    # Check path for any blocks / occupied safe squares (cannot land on or pass through)
+                # Main-track movement behaves differently before and after this colour
+                # has captured at least one enemy piece.
+                if not self.has_captured[check_agent]:
+                    # Pre-capture: home entry is blocked; movement always stays on main track and
+                    # may wrap around using modulo arithmetic. We only prevent passage through
+                    # blocked non-safe squares.
                     blocked = False
                     for step in range(1, self.current_dice + 1):
-                        dist = self.distance[check_agent][i] + step
-                        # Once we cross the last main square (distance MAIN_TRACK_LEN - 2),
-                        # remaining movement is inside home track.
-                        if dist > self.MAIN_TRACK_LEN - 2:
-                            break  # into home track, no more main squares
                         pos = (idx + step) % self.MAIN_TRACK_LEN
                         # On safe squares, allow stacking of any colours (no blocking, no captures).
                         if pos in self.SAFE_SQUARES:
@@ -435,6 +435,30 @@ class raw_env(AECEnv, EzPickle):
                             break
                     if not blocked:
                         legal.append(i)
+                else:
+                    # Post-capture: existing behaviour. Moves that reach or cross home entry
+                    # must enter the home track; wrapping is disallowed.
+                    new_dist = self.distance[check_agent][i] + self.current_dice
+                    # Maximum total distance: last main square (distance MAIN_TRACK_LEN - 2)
+                    # plus reachable home track (indices 0 .. HOME_LEN-1).
+                    if new_dist <= (self.MAIN_TRACK_LEN - 2) + (self.HOME_LEN - 1):
+                        # Check path for any blocks / occupied safe squares (cannot land on or pass through)
+                        blocked = False
+                        for step in range(1, self.current_dice + 1):
+                            dist = self.distance[check_agent][i] + step
+                            # Once we cross the last main square (distance MAIN_TRACK_LEN - 2),
+                            # remaining movement is inside home track.
+                            if dist > self.MAIN_TRACK_LEN - 2:
+                                break  # into home track, no more main squares
+                            pos = (idx + step) % self.MAIN_TRACK_LEN
+                            # On safe squares, allow stacking of any colours (no blocking, no captures).
+                            if pos in self.SAFE_SQUARES:
+                                continue
+                            if self._is_any_block(pos):
+                                blocked = True
+                                break
+                        if not blocked:
+                            legal.append(i)
 
             elif zone == "home":
                 if idx + self.current_dice < self.HOME_LEN:
@@ -524,31 +548,39 @@ class raw_env(AECEnv, EzPickle):
             self.distance[target_agent][action_piece_idx] = 0
 
         elif zone == "main":
-            # Move along the main track, then into the home track (if needed) in a single move.
-            # This prevents skipping the home entry or remaining on the main track after passing it.
-            current_dist = self.distance[target_agent][action_piece_idx]
             roll = self.current_dice
-            new_dist = current_dist + roll
-            self.distance[target_agent][action_piece_idx] = new_dist
-
-            last_main_distance = self.MAIN_TRACK_LEN - 2  # color-specific last main index (50, 11, 24, 37)
-            if new_dist <= last_main_distance:
-                # Entire move stays on the main track.
+            if not self.has_captured[target_agent]:
+                # Pre-capture: home entry is blocked; always stay on main track and wrap using modulo.
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
                 self.piece_state[target_agent][action_piece_idx] = ("main", new_pos)
                 capture = self._check_capture(target_agent, new_pos)
             else:
-                # The move crosses the home entry: consume remaining steps on the main track,
-                # then move the remainder inside the home track within this single move.
-                # Steps needed to reach the last main-track index (distance last_main_distance).
-                steps_to_entry = last_main_distance - current_dist
-                steps_in_home = roll - steps_to_entry - 1  # first step after entry is home index 0
-                # If we reach or pass the final home index in this single move, mark as finished.
-                if steps_in_home >= self.HOME_LEN - 1:
-                    self.piece_state[target_agent][action_piece_idx] = ("finished", None)
+                # Post-capture: existing behaviour. Moves that reach or cross home entry
+                # enter the home track; wrapping is disallowed.
+                # Move along the main track, then into the home track (if needed) in a single move.
+                # This prevents skipping the home entry or remaining on the main track after passing it.
+                current_dist = self.distance[target_agent][action_piece_idx]
+                new_dist = current_dist + roll
+                self.distance[target_agent][action_piece_idx] = new_dist
+
+                last_main_distance = self.MAIN_TRACK_LEN - 2  # color-specific last main index (50, 11, 24, 37)
+                if new_dist <= last_main_distance:
+                    # Entire move stays on the main track.
+                    new_pos = (idx + roll) % self.MAIN_TRACK_LEN
+                    self.piece_state[target_agent][action_piece_idx] = ("main", new_pos)
+                    capture = self._check_capture(target_agent, new_pos)
                 else:
-                    # Otherwise, land somewhere on the home track.
-                    self.piece_state[target_agent][action_piece_idx] = ("home", steps_in_home)
+                    # The move crosses the home entry: consume remaining steps on the main track,
+                    # then move the remainder inside the home track within this single move.
+                    # Steps needed to reach the last main-track index (distance last_main_distance).
+                    steps_to_entry = last_main_distance - current_dist
+                    steps_in_home = roll - steps_to_entry - 1  # first step after entry is home index 0
+                    # If we reach or pass the final home index in this single move, mark as finished.
+                    if steps_in_home >= self.HOME_LEN - 1:
+                        self.piece_state[target_agent][action_piece_idx] = ("finished", None)
+                    else:
+                        # Otherwise, land somewhere on the home track.
+                        self.piece_state[target_agent][action_piece_idx] = ("home", steps_in_home)
 
         elif zone == "home":
             new_idx = idx + self.current_dice
@@ -636,6 +668,14 @@ class raw_env(AECEnv, EzPickle):
                 i = indices[a][0]
                 self.piece_state[a][i] = ("yard", None)
                 self.distance[a][i] = 0
+                # Mark that this colour has captured at least one enemy piece.
+                self.has_captured[agent] = True
+                # After the first capture for this agent, recompute main-track distances
+                # so that subsequent home-entry behaviour matches the standard rules.
+                start_idx = self.START_INDEX[self.agents.index(agent)]
+                for p_idx, (z, idx2) in enumerate(self.piece_state[agent]):
+                    if z == "main" and idx2 is not None:
+                        self.distance[agent][p_idx] = (idx2 - start_idx) % self.MAIN_TRACK_LEN
                 return True
 
         return False
@@ -725,6 +765,22 @@ class raw_env(AECEnv, EzPickle):
                         screen_y - piece_offset_y + stack_offset_y,
                     ),
                 )
+
+        # Render capture markers (one per colour) at the precomputed yard centers
+        # when that colour has captured at least one enemy piece.
+        for agent in self.agents:
+            if getattr(self, "has_captured", {}).get(agent, False):
+                cx, cy = CAPTURE_MARK_POSITIONS[agent]
+                screen_cx = int(cx * scale)
+                screen_cy = int(cy * scale)
+                # Small coloured circle as an always-on marker (acts like an emoji).
+                colour_map = {
+                    "player_0": (0, 200, 0),      # Green
+                    "player_1": (220, 200, 0),    # Yellow
+                    "player_2": (0, 0, 220),      # Blue
+                    "player_3": (200, 0, 0),      # Red
+                }
+                pygame.draw.circle(self.screen, colour_map[agent], (screen_cx, screen_cy), 10)
 
         if self.render_mode == "human":
             pygame.event.pump()

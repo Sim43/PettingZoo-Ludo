@@ -128,3 +128,12 @@ YARD_POSITIONS = {
         (1324, 1546),   # Piece 3
     ],
 }
+
+# Precomputed centers of the 4 yard coordinates for each player.
+# Used to render a small capture marker when that colour has captured.
+CAPTURE_MARK_POSITIONS = {
+    "player_0": (355, 1426),  # Green
+    "player_1": (355, 350),   # Yellow
+    "player_2": (1444, 354),  # Blue
+    "player_3": (1435, 1438), # Red
+}
