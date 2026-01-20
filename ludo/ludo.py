@@ -2,7 +2,64 @@
 """
 # Ludo
 
-Classic Ludo implemented as a PettingZoo AEC environment.
+```{figure} ludo_board.png
+:width: 140px
+:name: ludo
+```
+
+This environment is a turn-based, multi-player board game environment compatible with the PettingZoo AEC API.
+
+| Import             | `from ludo import env`                             |
+|--------------------|----------------------------------------------------|
+| Actions            | Discrete                                           |
+| Parallel API       | No                                                 |
+| Manual Control     | No                                                 |
+| Agents             | `agents = ['player_0', 'player_1', 'player_2', 'player_3']` |
+| Agents             | 2–4 (configurable)                                 |
+| Action Shape       | (1,)                                               |
+| Action Values      | Discrete(5)                                        |
+| Observation Shape  | (75,) + action mask (5,)                           |
+| Observation Values | [0, 1]                                             |
+
+Ludo is a classic 2–4 player race game. Each player has four pieces which start in a yard and must travel once around the shared main track and then along a player-specific home track. Players take turns rolling a single six-sided die and moving one of their pieces according to the roll. A roll of
+6 brings a piece out of the yard and also grants an extra turn. The first player to bring all four pieces to their final home position wins.
+
+### Observation Space
+
+The observation is a dictionary which contains an `'observation'` element and an `'action_mask'` element.
+
+* `'observation'`: a 1D vector of length 75 encoding:
+  * main-track occupancy,
+  * each piece's zone (yard / main / home / finished) and progress,
+  * the current dice value,
+  * whose turn it is.
+* `'action_mask'`: a binary vector of length 5 indicating which actions are currently legal.
+
+Only the currently acting agent has a non-zero action mask. All other agents receive an all-zero mask.
+
+#### Legal Actions Mask
+
+Legal moves for the current agent are given by `'action_mask'`. The action space is `Discrete(5)`:
+
+* `0–3`: move the corresponding piece index (if legal),
+* `4`: PASS (only legal when no movement actions are available).
+
+Any action index with mask value 0 is illegal and, when taken, will terminate the episode for the acting agent via `TerminateIllegalWrapper`.
+
+### Action Space
+
+The action space is the set of integers from 0 to 4 (inclusive). On each turn, the dice has already been rolled, and the agent chooses which piece to move (or is forced to PASS when no moves are available).
+
+### Rewards
+
+* Winning agent: +1
+* Losing agents: -1
+* Illegal move: -1 for the acting agent (via wrapper), 0 for others
+* All other intermediate moves: 0
+
+### Version History
+
+* v0: Initial release.
 """
 
 from __future__ import annotations
@@ -17,7 +74,7 @@ from gymnasium.utils import EzPickle
 from pettingzoo import AECEnv
 from pettingzoo.utils import wrappers
 from pettingzoo.utils import agent_selector
-from coordinates import *
+from ludo.coordinates import *
 
 
 # ------------------------------------------------------------

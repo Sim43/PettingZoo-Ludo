@@ -1,4 +1,4 @@
-from ludo import env
+from ludo.ludo import env
 import random
 import time
 
