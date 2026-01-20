@@ -203,7 +203,8 @@ class raw_env(AECEnv, EzPickle):
                 elif zone == "main":
                     obs[offset] = (idx + 1) / 52.0
                 elif zone == "home":
-                    obs[offset] = 0.8 + idx / 10.0
+                    # Encode home progress in (0.8, 1.0) and stay within [0, 1]
+                    obs[offset] = 0.8 + idx / 30.0
                 else:
                     obs[offset] = 1.0
                 offset += 1
@@ -527,6 +528,7 @@ class raw_env(AECEnv, EzPickle):
             pygame.event.pump()
             pygame.display.update()
             self.clock.tick(self.metadata["render_fps"])
+            return None
 
         obs = np.array(pygame.surfarray.pixels3d(self.screen))
         return np.transpose(obs, (1, 0, 2))
