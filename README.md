@@ -11,7 +11,7 @@
 - **Clone and install in editable mode**:
 
 ```bash
-git clone https://github.com/yourusername/PettingZoo-Ludo.git
+git clone https://github.com/Sim43/PettingZoo-Ludo.git
 cd PettingZoo-Ludo
 pip install -e .
 ```
@@ -163,31 +163,8 @@ env.close()
 - **Run tests locally**:
 
 ```bash
-pip install -e .[test]  # or install pytest & pettingzoo[testing] manually
 pytest -v
 ```
-
-- The environment is wrapped in:
-  - `TerminateIllegalWrapper`
-  - `AssertOutOfBoundsWrapper`
-  - `OrderEnforcingWrapper`
-
-which are applied in the `env(**kwargs)` function in `ludo/ludo.py`.
-
----
-
-## Using this as a third-party PettingZoo environment
-
-- **Recommended repository name** for GitHub: something like `ludo-pettingzoo` or `pettingzoo-ludo`.
-- Once:
-  - API tests pass,
-  - the package installs cleanly via `pip install -e .` or from Git,
-  - and this README documents installation and usage,
-- you can follow the PettingZoo docs to:
-  - Add an entry for this repo in `docs/environments/third_party_envs.md` of the PettingZoo repository.
-  - Include a PettingZoo version badge and a short description.
-
-This repository is structured to be easily referenced as a third-party environment while you keep full ownership and maintenance in your own repo.
 
 ---
 
