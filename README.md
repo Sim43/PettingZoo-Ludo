@@ -29,11 +29,12 @@ Testing and tooling dependencies include `pytest`, `jinja2`, `typeguard`, `lark`
 
 ## Quickstart
 
-**Basic usage (no rendering):**
+**Basic usage (no rendering, free-for-all by default):**
 
 ```python
 from ludo.ludo import env
 
+# Free-for-all mode (default)
 env = env()
 env.reset(seed=42)
 
@@ -52,12 +53,27 @@ for agent in env.agent_iter():
     env.step(action)
 ```
 
-**With human rendering:**
+**With human rendering (and optional team mode):**
 
 ```python
 from ludo.ludo import env
 
+# Free-for-all
 env = env(render_mode="human")
+env.reset()
+for agent in env.agent_iter():
+    observation, reward, termination, truncation, info = env.last()
+    if termination or truncation:
+        action = None
+    else:
+        mask = info.get("action_mask", None)
+        legal = [i for i, v in enumerate(mask) if v == 1] if mask is not None else []
+        action = legal[0] if legal else 0
+    env.step(action)
+env.close()
+
+# 2v2 teams: (player_0, player_2) vs (player_1, player_3)
+env = env(render_mode="human", mode="teams")
 env.reset()
 for agent in env.agent_iter():
     observation, reward, termination, truncation, info = env.last()
@@ -75,11 +91,18 @@ env.close()
 
 ## Environment details
 
-### Agents and turns
+### Agents, turns, and game modes
 
 - **Agents**: up to **4 players** (`"player_0"`–`"player_3"`), configurable via `num_players` in `raw_env.__init__`.
 - **Turn order**: sequential, managed with PettingZoo's `agent_selector`.
 - **Three sixes rule**: three consecutive rolls of 6 for the same player cause their turn to be skipped and the dice reset.
+-- **Game modes**:
+  - **Free-for-all** (`mode="ffa"`, default): each player is an independent agent competing to finish all of their own pieces first.
+  - **Teams** (`mode="teams"`): fixed 2v2 teams:
+    - Team 0: `player_0` (Green) and `player_2` (Blue)
+    - Team 1: `player_1` (Yellow) and `player_3` (Red)
+    - When all pieces of both teammates are finished, the team wins and the episode terminates.
+    - In teams mode, finished agents still take turns and may use their dice rolls to move **their teammate's** pieces (dice-sharing).
 
 ### Action space
 
@@ -103,14 +126,20 @@ env.close()
 
 ### Rewards and termination
 
-- **Rewards**:
+- **Rewards (free-for-all)**:
   - **+1** for the winning agent (all 4 pieces finished).
   - **-1** for each losing agent at game end.
   - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
   - **0** for all other intermediate moves.
+- **Rewards (teams)**:
+  - **+1** for each agent on the winning team (both teammates have all 4 pieces finished).
+  - **-1** for each agent on the losing team.
+  - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
+  - **0** for all other intermediate moves.
 - **Terminations**:
-  - Episode ends when any player gets all four pieces to the final home position.
-  - Per-agent `terminations[agent]` flags are used, as required by the AEC API.
+  - **Free-for-all**: episode ends when any player gets all four pieces to the final home position.
+  - **Teams**: episode ends when all pieces of both teammates on a team are finished.
+  - In both modes, per-agent `terminations[agent]` flags are used, as required by the AEC API.
 - **Truncations**:
   - Currently no built-in `max_cycles`; `truncations` remain `False` unless integrated into a higher-level wrapper.
 

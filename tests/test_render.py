@@ -57,7 +57,12 @@ def main():
         game.step(action)
 
         if game.terminations[agent]:
-            print(f"\n🏆 Winner: {agent}")
+            # In teams mode, both teammates win together. Show all agents with positive reward.
+            if mode == "teams":
+                winners = [a for a, r in game.rewards.items() if r > 0]
+                print(f"\n🏆 Winning team: {winners}")
+            else:
+                print(f"\n🏆 Winner: {agent}")
             break
 
         time.sleep(0.1)
