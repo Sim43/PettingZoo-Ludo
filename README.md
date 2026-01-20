@@ -159,7 +159,10 @@ env.close()
   - Any move that would go beyond this last main square automatically continues into the **home track in the same move**, so pieces never skip home entry or remain on the main track after passing it.
 - **Safe squares and blocks**:
   - Certain main-track indices are **safe squares** where captures are not allowed.
-  - **Blocks** (two or more pieces of the same player on a main square) cannot be captured and also block passage for other pieces.
+  - **Blocks**:
+    - In **free-for-all**, a block is two or more pieces of the **same player** on a main square.
+    - In **teams mode**, a block is two or more pieces from the **same team** on a main square (teammates can form team blocks).
+    - Blocks cannot be captured and also block passage for other pieces on non-safe squares.
 - **Captures**:
   - Non-safe, non-blocked squares with exactly one opponent piece allow captures, sending that piece back to its yard.
 
