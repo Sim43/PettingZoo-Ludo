@@ -97,11 +97,30 @@ def env(**kwargs):
     return env
 
 
+# Team mapping for 2v2 mode
+TEAM_MAP = {
+    "player_0": 0,
+    "player_2": 0,
+    "player_1": 1,
+    "player_3": 1,
+}
+
+
 # ------------------------------------------------------------
 # Environment
 # ------------------------------------------------------------
 
 class raw_env(AECEnv, EzPickle):
+    """
+    Ludo environment supporting both free-for-all (FFA) and 2v2 team-based modes.
+    
+    Modes:
+    - mode="ffa" (default): Classic free-for-all where each player competes individually.
+      First player to finish all pieces wins.
+    - mode="teams": 2v2 cooperative-competitive mode. Teams: (player_0, player_2) vs (player_1, player_3).
+      Team wins when both teammates finish all pieces. Teammates cannot capture each other but can form blocks.
+      Finished agents can use their dice rolls to move their teammate's pieces (dice-sharing).
+    """
     metadata = {
         "render_modes": ["human", "rgb_array"],
         "name": "ludo_v0",
@@ -116,14 +135,26 @@ class raw_env(AECEnv, EzPickle):
     SAFE_SQUARES = {0, 8, 13, 21, 26, 34, 39, 47}
     START_INDEX = [0, 13, 26, 39]
 
-    def __init__(self, num_players=4, render_mode=None, screen_scaling=8):
-        EzPickle.__init__(self, num_players, render_mode, screen_scaling)
+    def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="ffa"):
+        EzPickle.__init__(self, num_players, render_mode, screen_scaling, mode)
         super().__init__()
 
         assert 2 <= num_players <= 4
+        assert mode in ("ffa", "teams"), f"mode must be 'ffa' or 'teams', got '{mode}'"
+        if mode == "teams":
+            assert num_players == 4, "teams mode requires exactly 4 players"
+        
         self.num_players = num_players
         self.render_mode = render_mode
         self.screen_scaling = screen_scaling
+        self.mode = mode
+        self.team_mode = (mode == "teams")
+        
+        # Team mapping: only used in teams mode
+        if self.team_mode:
+            self.team_map = {a: TEAM_MAP[a] for a in [f"player_{i}" for i in range(4)]}
+        else:
+            self.team_map = {}
 
         self.agents = [f"player_{i}" for i in range(num_players)]
         self.possible_agents = self.agents[:]
@@ -213,7 +244,22 @@ class raw_env(AECEnv, EzPickle):
         # Gymnasium's Discrete space expects mask dtype to be np.int8.
         action_mask = np.zeros(5, dtype=np.int8)
         if agent == self.agent_selection:
-            for a in self._legal_actions(agent):
+            # In teams mode: if agent is finished, check teammate's legal actions
+            if self.team_mode:
+                all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
+                if all_finished:
+                    teammate = self._get_teammate(agent)
+                    if teammate is not None:
+                        # Agent helps teammate: use teammate's legal actions
+                        legal = self._legal_actions(agent, target_agent=teammate)
+                    else:
+                        legal = [4]  # No teammate, only PASS
+                else:
+                    legal = self._legal_actions(agent)
+            else:
+                legal = self._legal_actions(agent)
+            
+            for a in legal:
                 action_mask[a] = 1
 
         # Expose the action mask through info so TerminateIllegalWrapper can use it
@@ -229,6 +275,34 @@ class raw_env(AECEnv, EzPickle):
         return self.action_spaces[agent]
 
     # ------------------------------------------------------------
+    # Team helpers
+    # ------------------------------------------------------------
+
+    def _same_team(self, a, b):
+        """Return True if agents a and b are on the same team (teams mode only)."""
+        if not self.team_mode:
+            return False
+        return self.team_map.get(a) == self.team_map.get(b)
+
+    def _get_teammate(self, agent):
+        """Return the teammate of agent (teams mode only). Returns None if not in teams mode or no teammate."""
+        if not self.team_mode:
+            return None
+        team_id = self.team_map.get(agent)
+        if team_id is None:
+            return None
+        for a in self.agents:
+            if a != agent and self.team_map.get(a) == team_id:
+                return a
+        return None
+
+    def _is_enemy(self, agent, other):
+        """Return True if other is an enemy of agent (different team in teams mode, different agent in FFA)."""
+        if not self.team_mode:
+            return agent != other
+        return not self._same_team(agent, other)
+
+    # ------------------------------------------------------------
     # Legal actions
     # ------------------------------------------------------------
 
@@ -242,7 +316,10 @@ class raw_env(AECEnv, EzPickle):
         return pieces
 
     def _is_any_block(self, pos):
-        """Return True if any player has a block (2+ pieces) on this main-track position."""
+        """Return True if any colour (agent) has a block (2+ of its own pieces) on this main-track position.
+
+        In both FFA and teams modes, blocks are tracked per colour, not per team.
+        """
         pieces = self._pieces_on_main(pos)
         counts = {}
         for a, _ in pieces:
@@ -250,11 +327,11 @@ class raw_env(AECEnv, EzPickle):
         return any(c >= 2 for c in counts.values())
 
     def _is_enemy_block(self, agent, pos):
-        """Return True if an enemy has a block on this main-track position."""
+        """Return True if an enemy colour has a block (2+ of its own pieces) on this main-track position."""
         pieces = self._pieces_on_main(pos)
         counts = {}
         for a, _ in pieces:
-            if a == agent:
+            if not self._is_enemy(agent, a):
                 continue
             counts[a] = counts.get(a, 0) + 1
         return any(c >= 2 for c in counts.values())
@@ -262,46 +339,57 @@ class raw_env(AECEnv, EzPickle):
     def _is_enemy_occupied(self, agent, pos):
         """Check if any enemy piece is on a given main-track position."""
         for a in self.agents:
-            if a == agent:
+            if not self._is_enemy(agent, a):
                 continue
             for zone, idx in self.piece_state[a]:
                 if zone == "main" and idx == pos:
                     return True
         return False
 
-    def _legal_actions(self, agent):
+    def _legal_actions(self, agent, target_agent=None):
+        """
+        Return legal actions for agent.
+        In teams mode, if target_agent is provided, compute legal actions for target_agent's pieces
+        (used when finished agent helps teammate).
+        """
+        # Determine which agent's pieces we're checking
+        check_agent = target_agent if target_agent is not None else agent
+        
         legal = []
-        for i, (zone, idx) in enumerate(self.piece_state[agent]):
+        for i, (zone, idx) in enumerate(self.piece_state[check_agent]):
             if zone == "finished":
                 continue
 
             if zone == "yard" and self.current_dice == 6:
-                # Entering main track: blocked if any block or enemy on safe entry square
-                start = self.START_INDEX[self.agents.index(agent)]
-                blocked_entry = self._is_any_block(start) or (
-                    start in self.SAFE_SQUARES and self._is_enemy_occupied(agent, start)
-                )
+                # Entering main track:
+                # - On non-safe squares: blocked by any block.
+                # - On safe squares: allow stacking of any colours, do not block entry.
+                start = self.START_INDEX[self.agents.index(check_agent)]
+                if start in self.SAFE_SQUARES:
+                    blocked_entry = False
+                else:
+                    blocked_entry = self._is_any_block(start)
                 if not blocked_entry:
                     legal.append(i)
 
             elif zone == "main":
-                new_dist = self.distance[agent][i] + self.current_dice
+                new_dist = self.distance[check_agent][i] + self.current_dice
                 # Maximum total distance: last main square (distance MAIN_TRACK_LEN - 2)
                 # plus full home track.
                 if new_dist <= (self.MAIN_TRACK_LEN - 2) + self.HOME_LEN:
                     # Check path for any blocks / occupied safe squares (cannot land on or pass through)
                     blocked = False
                     for step in range(1, self.current_dice + 1):
-                        dist = self.distance[agent][i] + step
+                        dist = self.distance[check_agent][i] + step
                         # Once we cross the last main square (distance MAIN_TRACK_LEN - 2),
                         # remaining movement is inside home track.
                         if dist > self.MAIN_TRACK_LEN - 2:
                             break  # into home track, no more main squares
                         pos = (idx + step) % self.MAIN_TRACK_LEN
+                        # On safe squares, allow stacking of any colours (no blocking, no captures).
+                        if pos in self.SAFE_SQUARES:
+                            continue
                         if self._is_any_block(pos):
-                            blocked = True
-                            break
-                        if pos in self.SAFE_SQUARES and self._is_enemy_occupied(agent, pos):
                             blocked = True
                             break
                     if not blocked:
@@ -353,7 +441,21 @@ class raw_env(AECEnv, EzPickle):
         agent = self.agent_selection
         self.rewards = {a: 0 for a in self.agents}
 
-        legal = self._legal_actions(agent)
+        # In teams mode: check if agent is finished and helping teammate
+        target_agent = agent
+        action_piece_idx = action
+        all_finished = False
+        if self.team_mode:
+            all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
+            if all_finished:
+                teammate = self._get_teammate(agent)
+                if teammate is not None:
+                    # Agent is helping teammate: remap action to teammate's pieces
+                    target_agent = teammate
+                    # Legal actions are computed for teammate's pieces, so action index is already correct
+                    action_piece_idx = action
+
+        legal = self._legal_actions(agent, target_agent=target_agent if self.team_mode and all_finished else None)
 
         # With PASS action, there is always at least one legal action (4) even if no moves exist
         if action not in legal:
@@ -369,26 +471,26 @@ class raw_env(AECEnv, EzPickle):
             self._accumulate_rewards()
             return
 
-        zone, idx = self.piece_state[agent][action]
+        zone, idx = self.piece_state[target_agent][action_piece_idx]
 
         if zone == "yard":
-            start = self.START_INDEX[self.agents.index(agent)]
-            self.piece_state[agent][action] = ("main", start)
-            self.distance[agent][action] = 0
+            start = self.START_INDEX[self.agents.index(target_agent)]
+            self.piece_state[target_agent][action_piece_idx] = ("main", start)
+            self.distance[target_agent][action_piece_idx] = 0
 
         elif zone == "main":
             # Move along the main track, then into the home track (if needed) in a single move.
             # This prevents skipping the home entry or remaining on the main track after passing it.
-            current_dist = self.distance[agent][action]
+            current_dist = self.distance[target_agent][action_piece_idx]
             roll = self.current_dice
             new_dist = current_dist + roll
-            self.distance[agent][action] = new_dist
+            self.distance[target_agent][action_piece_idx] = new_dist
 
             last_main_distance = self.MAIN_TRACK_LEN - 2  # color-specific last main index (50, 11, 24, 37)
             if new_dist <= last_main_distance:
                 # Entire move stays on the main track.
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
-                self.piece_state[agent][action] = ("main", new_pos)
+                self.piece_state[target_agent][action_piece_idx] = ("main", new_pos)
                 capture = self._check_capture(agent, new_pos)
             else:
                 # The move crosses the home entry: consume remaining steps on the main track,
@@ -396,23 +498,49 @@ class raw_env(AECEnv, EzPickle):
                 # Steps needed to reach the last main-track index (distance last_main_distance).
                 steps_to_entry = last_main_distance - current_dist
                 steps_in_home = roll - steps_to_entry - 1  # first step after entry is home index 0
-                # We don't perform captures on the entry square or inside home.
-                self.piece_state[agent][action] = ("home", steps_in_home)
+                # If we reach or pass the final home index in this single move, mark as finished.
+                if steps_in_home >= self.HOME_LEN - 1:
+                    self.piece_state[target_agent][action_piece_idx] = ("finished", None)
+                else:
+                    # Otherwise, land somewhere on the home track.
+                    self.piece_state[target_agent][action_piece_idx] = ("home", steps_in_home)
 
         elif zone == "home":
             new_idx = idx + self.current_dice
             if new_idx == self.HOME_LEN - 1:
-                self.piece_state[agent][action] = ("finished", None)
+                self.piece_state[target_agent][action_piece_idx] = ("finished", None)
             else:
-                self.piece_state[agent][action] = ("home", new_idx)
+                self.piece_state[target_agent][action_piece_idx] = ("home", new_idx)
 
         # Win check
-        if all(z == "finished" for z, _ in self.piece_state[agent]):
-            for a in self.agents:
-                self.terminations[a] = True
-                self.rewards[a] = 1 if a == agent else -1
-            self._accumulate_rewards()
-            return
+        if self.team_mode:
+            # Teams mode: check if both teammates have finished all pieces
+            # Check the team of the agent whose piece just moved (target_agent)
+            team_id = self.team_map.get(target_agent)
+            if team_id is not None:
+                team_agents = [a for a in self.agents if self.team_map.get(a) == team_id]
+                team_finished = all(
+                    all(z == "finished" for z, _ in self.piece_state[a])
+                    for a in team_agents
+                )
+                if team_finished:
+                    # Winning team gets +1, losing team gets -1
+                    for a in self.agents:
+                        self.terminations[a] = True
+                        if self.team_map.get(a) == team_id:
+                            self.rewards[a] = 1
+                        else:
+                            self.rewards[a] = -1
+                    self._accumulate_rewards()
+                    return
+        else:
+            # FFA mode: individual win
+            if all(z == "finished" for z, _ in self.piece_state[agent]):
+                for a in self.agents:
+                    self.terminations[a] = True
+                    self.rewards[a] = 1 if a == agent else -1
+                self._accumulate_rewards()
+                return
 
         extra_turn = self.current_dice == 6 or capture
 
@@ -447,7 +575,8 @@ class raw_env(AECEnv, EzPickle):
         counts = {}
         indices = {}
         for a, i in pieces:
-            if a == agent:
+            # In teams mode: skip teammates; in FFA: skip self
+            if not self._is_enemy(agent, a):
                 continue
             counts[a] = counts.get(a, 0) + 1
             indices.setdefault(a, []).append(i)
@@ -523,14 +652,21 @@ class raw_env(AECEnv, EzPickle):
 
                 screen_x = int(x * scale)
                 screen_y = int(y * scale)
-                # Small deterministic offset only when multiple pieces share the same logical position
+                # Small deterministic offset only when multiple pieces share the same logical position.
+                # For finished pieces, we also apply offsets so stacked finished pieces are visible.
                 same_spot_count = 0
                 for a2 in self.agents:
                     for _, (z2, idx2) in enumerate(self.piece_state[a2]):
-                        # Only treat pieces as stacked when they share a well-defined logical position
-                        # (i.e., same zone and non-None index). This avoids offsets for distinct yard/finished pieces.
-                        if z2 == zone and idx2 is not None and idx2 == idx:
-                            same_spot_count += 1
+                        if z2 != zone:
+                            continue
+                        if zone == "finished":
+                            # All finished pieces of the same colour share the final home position.
+                            if a2 == agent:
+                                same_spot_count += 1
+                        else:
+                            # For yard/main/home we require a concrete matching index.
+                            if idx2 is not None and idx2 == idx:
+                                same_spot_count += 1
                 if same_spot_count > 1:
                     stack_offset_x = (piece_idx % 2) * 6
                     stack_offset_y = (piece_idx // 2) * 6

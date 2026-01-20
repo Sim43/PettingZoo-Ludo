@@ -1,45 +1,70 @@
 from ludo.ludo import env
 import random
 import time
+import argparse
 
-game = env(render_mode="human")
-game.reset()
 
-print("Starting Ludo test")
+def main():
+    parser = argparse.ArgumentParser(description="Render test for Ludo environment.")
+    parser.add_argument(
+        "--single",
+        action="store_true",
+        help="Run in single-player free-for-all mode (default).",
+    )
+    parser.add_argument(
+        "--team",
+        action="store_true",
+        help="Run in 2v2 team mode.",
+    )
+    args = parser.parse_args()
 
-MAX_STEPS = 1000
-steps = 0
+    # Default is single/FFA mode unless --team is explicitly requested
+    mode = "ffa"
+    if args.team:
+        mode = "teams"
 
-while game.agents and steps < MAX_STEPS:
-    steps += 1
+    game = env(render_mode="human", mode=mode)
+    game.reset()
 
-    agent = game.agent_selection
-    obs = game.observe(agent)
+    print(f"Starting Ludo test in mode='{mode}'")
 
-    # Last 5 entries are the action mask, first 75 are the core observation
-    mask = obs[75:]
-    legal = [i for i, v in enumerate(mask) if v == 1]
-    dice = int(obs[68] * 6)
+    MAX_STEPS = 1000
+    steps = 0
 
-    print(f"\nAgent: {agent}")
-    print(f"Dice: {dice}")
-    print(f"Legal actions: {legal}")
+    while game.agents and steps < MAX_STEPS:
+        steps += 1
 
-    if legal:
-        action = random.choice(legal)
-        print(f"Chosen action: {action}")
-    else:
-        # Must pass a VALID action, env will auto-pass
-        action = 0
-        print("No legal moves -> implicit pass")
+        agent = game.agent_selection
+        obs = game.observe(agent)
 
-    game.step(action)
+        # Last 5 entries are the action mask, first 75 are the core observation
+        mask = obs[75:]
+        legal = [i for i, v in enumerate(mask) if v == 1]
+        dice = int(obs[68] * 6)
 
-    if game.terminations[agent]:
-        print(f"\n🏆 Winner: {agent}")
-        break
+        print(f"\nAgent: {agent}")
+        print(f"Dice: {dice}")
+        print(f"Legal actions: {legal}")
 
-    time.sleep(0.2)
+        if legal:
+            action = random.choice(legal)
+            print(f"Chosen action: {action}")
+        else:
+            # Must pass a VALID action, env will auto-pass
+            action = 0
+            print("No legal moves -> implicit pass")
 
-game.close()
-print("\nTest finished.")
+        game.step(action)
+
+        if game.terminations[agent]:
+            print(f"\n🏆 Winner: {agent}")
+            break
+
+        time.sleep(0.1)
+
+    game.close()
+    print("\nTest finished.")
+
+
+if __name__ == "__main__":
+    main()
