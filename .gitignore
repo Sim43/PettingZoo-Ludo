@@ -1,0 +1,53 @@
+############################
+# Python / General
+############################
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env/
+
+# Distribution / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Logs
+*.log
+
+# Unit test / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+############################
+# Project-specific
+############################
+# Godot generated files
+Godot_Ludo/.godot/
+Godot_Ludo/.import/
+
+# OS files
+.DS_Store
+Thumbs.db
+
