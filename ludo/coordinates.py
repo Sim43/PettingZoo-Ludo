@@ -11,7 +11,7 @@ Yard: 4 starting positions per player
 
 # Main track positions (0-51) - shared by all players
 MAIN_TRACK_POSITIONS = {
-    0: (783, 1624),
+    0: (783, 1624),  # Safe square
     1: (783, 1502),
     2: (783, 1381),
     3: (783, 1260),

@@ -286,12 +286,16 @@ class raw_env(AECEnv, EzPickle):
 
             elif zone == "main":
                 new_dist = self.distance[agent][i] + self.current_dice
-                if new_dist <= 51 + self.HOME_LEN:
+                # Maximum total distance: last main square (distance MAIN_TRACK_LEN - 2)
+                # plus full home track.
+                if new_dist <= (self.MAIN_TRACK_LEN - 2) + self.HOME_LEN:
                     # Check path for any blocks / occupied safe squares (cannot land on or pass through)
                     blocked = False
                     for step in range(1, self.current_dice + 1):
                         dist = self.distance[agent][i] + step
-                        if dist >= self.MAIN_TRACK_LEN:
+                        # Once we cross the last main square (distance MAIN_TRACK_LEN - 2),
+                        # remaining movement is inside home track.
+                        if dist > self.MAIN_TRACK_LEN - 2:
                             break  # into home track, no more main squares
                         pos = (idx + step) % self.MAIN_TRACK_LEN
                         if self._is_any_block(pos):
@@ -380,7 +384,8 @@ class raw_env(AECEnv, EzPickle):
             new_dist = current_dist + roll
             self.distance[agent][action] = new_dist
 
-            if new_dist < self.MAIN_TRACK_LEN:
+            last_main_distance = self.MAIN_TRACK_LEN - 2  # color-specific last main index (50, 11, 24, 37)
+            if new_dist <= last_main_distance:
                 # Entire move stays on the main track.
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
                 self.piece_state[agent][action] = ("main", new_pos)
@@ -388,8 +393,8 @@ class raw_env(AECEnv, EzPickle):
             else:
                 # The move crosses the home entry: consume remaining steps on the main track,
                 # then move the remainder inside the home track within this single move.
-                # Steps needed to reach the last main-track index (distance MAIN_TRACK_LEN - 1).
-                steps_to_entry = (self.MAIN_TRACK_LEN - 1) - current_dist
+                # Steps needed to reach the last main-track index (distance last_main_distance).
+                steps_to_entry = last_main_distance - current_dist
                 steps_in_home = roll - steps_to_entry - 1  # first step after entry is home index 0
                 # We don't perform captures on the entry square or inside home.
                 self.piece_state[agent][action] = ("home", steps_in_home)
