@@ -65,7 +65,7 @@ The action space is the set of integers from 0 to 4 (inclusive). On each turn, t
 **single mode:**
 * Terminal ranks (1st / 2nd / 3rd / 4th): +1.00 / +0.30 / −0.30 / −1.00
 * Illegal move: −1 for the acting agent (via wrapper), 0 for others
-* All other moves: 0, plus dense shaping (captures, being captured, finishing pieces, leaving the yard, threat exposure, and loop waste).
+* All other moves: 0, plus dense shaping (captures, being captured, finishing pieces, leaving the yard, loop waste per full pre-capture loop, and threat exposure that accounts for multiple nearby enemy pieces behind).
 
 **Teams mode:**
 * Winning team (both teammates): +1 for each agent on the winning team
@@ -449,7 +449,7 @@ class raw_env(AECEnv, EzPickle):
         return None
 
     def _apply_threat_penalty(self, mover, owner, piece_idx):
-        """Penalty if the moved piece is easily capturable next enemy turn."""
+        """Penalty if the moved piece is in near-term capture threat."""
         zone, idx = self.piece_state[owner][piece_idx]
         if zone != "main" or idx in self.SAFE_SQUARES:
             return
@@ -458,7 +458,8 @@ class raw_env(AECEnv, EzPickle):
         if enemy is None:
             return
 
-        capturable = False
+        # Aggregate capture probability from enemy pieces behind within 6+6+5 squares.
+        p_total = 0.0
         for z_e, pos_e in self.piece_state[enemy]:
             if z_e != "main":
                 continue
@@ -468,15 +469,17 @@ class raw_env(AECEnv, EzPickle):
                     continue
                 if self._is_any_block(idx):
                     continue
-                capturable = True
-                break
+                p_total += 1.0 / 6.0
+            elif 7 <= d <= 12:
+                p_total += 1.0 / 36.0
+            elif 13 <= d <= 17:
+                p_total += 1.0 / 216.0
 
-        if not capturable:
+        if p_total <= 0.0:
             return
 
-        p = 1.0 / 6.0
         s = self._progress_to_home(owner, piece_idx, zone, idx)
-        penalty = -0.48 * p * (0.5 + 0.5 * s)
+        penalty = -0.48 * p_total * (0.5 + 0.5 * s)
         # Clamp to [-0.08, 0].
         penalty = max(-0.08, min(0.0, penalty))
         self.rewards[mover] += penalty
@@ -620,11 +623,12 @@ class raw_env(AECEnv, EzPickle):
             if not self.has_captured[target_agent]:
                 old_steps = self.pre_capture_steps[target_agent][action_piece_idx]
                 new_steps = old_steps + roll
-                if old_steps < self.MAIN_TRACK_LEN and new_steps >= self.MAIN_TRACK_LEN:
-                    self.rewards[agent] -= 0.20
-                self.pre_capture_steps[target_agent][action_piece_idx] = (
-                    new_steps % self.MAIN_TRACK_LEN
-                )
+                loops_before = old_steps // self.MAIN_TRACK_LEN
+                loops_after = new_steps // self.MAIN_TRACK_LEN
+                wasted_loops = max(0, loops_after - loops_before)
+                if wasted_loops > 0:
+                    self.rewards[agent] -= 0.20 * wasted_loops
+                self.pre_capture_steps[target_agent][action_piece_idx] = new_steps
 
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
                 self.piece_state[target_agent][action_piece_idx] = ("main", new_pos)
