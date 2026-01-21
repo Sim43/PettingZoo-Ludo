@@ -9,7 +9,7 @@ def main():
     parser.add_argument(
         "--single",
         action="store_true",
-        help="Run in single-player free-for-all mode (default).",
+        help="Run in single-player single mode (default).",
     )
     parser.add_argument(
         "--team",
@@ -18,8 +18,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Default is single/FFA mode unless --team is explicitly requested
-    mode = "ffa"
+    # Default is single mode unless --team is explicitly requested
+    mode = "single"
     if args.team:
         mode = "teams"
 

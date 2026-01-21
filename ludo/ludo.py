@@ -28,7 +28,7 @@ Ludo is a classic 2–4 player race game. Each player has four pieces which star
 
 The environment supports two modes via the `mode` parameter:
 
-* **Free-for-all** (`mode="ffa"`, default): Each player competes individually. The first player to bring all four pieces to their final home position wins.
+* **single** (`mode="single"`, default): Each player competes individually. The first player to bring all four pieces to their final home position wins.
 
 * **Teams** (`mode="teams"`): Fixed 2v2 team-based play. Teams: (player_0, player_2) vs (player_1, player_3). A team wins when both teammates finish all four pieces. Teammates cannot capture each other but can form team blocks (2+ pieces from the same team on a square). Finished agents can use their dice rolls to move their teammate's pieces (dice-sharing).
 
@@ -62,7 +62,7 @@ The action space is the set of integers from 0 to 4 (inclusive). On each turn, t
 
 ### Rewards
 
-**Free-for-all mode:**
+**single mode:**
 * Winning agent: +1
 * Losing agents: -1
 * Illegal move: -1 for the acting agent (via wrapper), 0 for others
@@ -129,10 +129,10 @@ TEAM_MAP = {
 
 class raw_env(AECEnv, EzPickle):
     """
-    Ludo environment supporting both free-for-all (FFA) and 2v2 team-based modes.
+    Ludo environment supporting both single (single) and 2v2 team-based modes.
     
     Modes:
-    - mode="ffa" (default): Classic free-for-all where each player competes individually.
+    - mode="single" (default): Classic single where each player competes individually.
       First player to finish all pieces wins.
     - mode="teams": 2v2 cooperative-competitive mode. Teams: (player_0, player_2) vs (player_1, player_3).
       Team wins when both teammates finish all pieces. Teammates cannot capture each other but can form blocks.
@@ -152,12 +152,12 @@ class raw_env(AECEnv, EzPickle):
     SAFE_SQUARES = {0, 8, 13, 21, 26, 34, 39, 47}
     START_INDEX = [0, 13, 26, 39]
 
-    def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="ffa"):
+    def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="single"):
         EzPickle.__init__(self, num_players, render_mode, screen_scaling, mode)
         super().__init__()
 
         assert 2 <= num_players <= 4
-        assert mode in ("ffa", "teams"), f"mode must be 'ffa' or 'teams', got '{mode}'"
+        assert mode in ("single", "teams"), f"mode must be 'single' or 'teams', got '{mode}'"
         if mode == "teams":
             assert num_players == 4, "teams mode requires exactly 4 players"
         
@@ -222,7 +222,7 @@ class raw_env(AECEnv, EzPickle):
         self.consecutive_sixes = {a: 0 for a in self.agents}
 
         # Track whether each colour (agent) has captured at least one enemy piece.
-        # This gates home entry per colour in both FFA and teams modes.
+        # This gates home entry per colour in both single and teams modes.
         self.has_captured = {a: False for a in self.agents}
 
         # Roll dice for the first agent so there is always an active dice value
@@ -318,7 +318,7 @@ class raw_env(AECEnv, EzPickle):
         return None
 
     def _is_enemy(self, agent, other):
-        """Return True if other is an enemy of agent (different team in teams mode, different agent in FFA)."""
+        """Return True if other is an enemy of agent (different team in teams mode, different agent in single)."""
         if not self.team_mode:
             return agent != other
         return not self._same_team(agent, other)
@@ -339,12 +339,12 @@ class raw_env(AECEnv, EzPickle):
     def _is_any_block(self, pos):
         """Return True if any block (2+ aligned pieces) is on this main-track position.
 
-        - FFA: blocks are per colour (2+ pieces of the same agent).
+        - single: blocks are per colour (2+ pieces of the same agent).
         - Teams mode: blocks are per team (2+ pieces from the same team, possibly split across teammates).
         """
         pieces = self._pieces_on_main(pos)
         if not self.team_mode:
-            # Free-for-all: count per agent/colour.
+            # single: count per agent/colour.
             counts = {}
             for a, _ in pieces:
                 counts[a] = counts.get(a, 0) + 1
@@ -363,7 +363,7 @@ class raw_env(AECEnv, EzPickle):
         """Return True if an enemy block (2+ aligned pieces) is on this main-track position."""
         pieces = self._pieces_on_main(pos)
         if not self.team_mode:
-            # FFA: count per enemy colour.
+            # single: count per enemy colour.
             counts = {}
             for a, _ in pieces:
                 if not self._is_enemy(agent, a):
@@ -532,6 +532,7 @@ class raw_env(AECEnv, EzPickle):
             return
 
         capture = False
+        finished_this_move = False
 
         # PASS action: skip movement, advance turn and roll new dice
         if action == 4:
@@ -578,6 +579,7 @@ class raw_env(AECEnv, EzPickle):
                     # If we reach or pass the final home index in this single move, mark as finished.
                     if steps_in_home >= self.HOME_LEN - 1:
                         self.piece_state[target_agent][action_piece_idx] = ("finished", None)
+                        finished_this_move = True
                     else:
                         # Otherwise, land somewhere on the home track.
                         self.piece_state[target_agent][action_piece_idx] = ("home", steps_in_home)
@@ -586,6 +588,7 @@ class raw_env(AECEnv, EzPickle):
             new_idx = idx + self.current_dice
             if new_idx == self.HOME_LEN - 1:
                 self.piece_state[target_agent][action_piece_idx] = ("finished", None)
+                finished_this_move = True
             else:
                 self.piece_state[target_agent][action_piece_idx] = ("home", new_idx)
 
@@ -611,7 +614,7 @@ class raw_env(AECEnv, EzPickle):
                     self._accumulate_rewards()
                     return
         else:
-            # FFA mode: individual win
+            # single mode: individual win
             if all(z == "finished" for z, _ in self.piece_state[agent]):
                 for a in self.agents:
                     self.terminations[a] = True
@@ -619,7 +622,11 @@ class raw_env(AECEnv, EzPickle):
                 self._accumulate_rewards()
                 return
 
-        extra_turn = self.current_dice == 6 or capture
+        # Extra turn conditions:
+        # - rolling a 6
+        # - capturing an enemy piece
+        # - finishing a piece (entering the final home position this move)
+        extra_turn = self.current_dice == 6 or capture or finished_this_move
 
         if self.render_mode == "human":
             self.render()
@@ -652,7 +659,7 @@ class raw_env(AECEnv, EzPickle):
         counts = {}
         indices = {}
         for a, i in pieces:
-            # In teams mode: skip teammates; in FFA: skip self
+            # In teams mode: skip teammates; in single: skip self
             if not self._is_enemy(agent, a):
                 continue
             counts[a] = counts.get(a, 0) + 1

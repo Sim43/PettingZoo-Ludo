@@ -29,12 +29,12 @@ Testing and tooling dependencies include `pytest`, `jinja2`, `typeguard`, `lark`
 
 ## Quickstart
 
-**Basic usage (no rendering, free-for-all by default):**
+**Basic usage (no rendering, single by default):**
 
 ```python
 from ludo.ludo import env
 
-# Free-for-all mode (default)
+# single mode (default)
 env = env()
 env.reset(seed=42)
 
@@ -58,7 +58,7 @@ for agent in env.agent_iter():
 ```python
 from ludo.ludo import env
 
-# Free-for-all
+# single
 env = env(render_mode="human")
 env.reset()
 for agent in env.agent_iter():
@@ -97,7 +97,7 @@ env.close()
 - **Turn order**: sequential, managed with PettingZoo's `agent_selector`.
 - **Three sixes rule**: three consecutive rolls of 6 for the same player cause their turn to be skipped and the dice reset.
 -- **Game modes**:
-  - **Free-for-all** (`mode="ffa"`, default): each player is an independent agent competing to finish all of their own pieces first.
+  - **single** (`mode="single"`, default): each player is an independent agent competing to finish all of their own pieces first.
   - **Teams** (`mode="teams"`): fixed 2v2 teams:
     - Team 0: `player_0` (Green) and `player_2` (Blue)
     - Team 1: `player_1` (Yellow) and `player_3` (Red)
@@ -126,7 +126,7 @@ env.close()
 
 ### Rewards and termination
 
-- **Rewards (free-for-all)**:
+- **Rewards (single)**:
   - **+1** for the winning agent (all 4 pieces finished).
   - **-1** for each losing agent at game end.
   - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
@@ -137,7 +137,7 @@ env.close()
   - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
   - **0** for all other intermediate moves.
 - **Terminations**:
-  - **Free-for-all**: episode ends when any player gets all four pieces to the final home position.
+  - **single**: episode ends when any player gets all four pieces to the final home position.
   - **Teams**: episode ends when all pieces of both teammates on a team are finished.
   - In both modes, per-agent `terminations[agent]` flags are used, as required by the AEC API.
 - **Truncations**:
@@ -145,7 +145,7 @@ env.close()
 
 ### Ludo-specific rules
 
-- This environment implements a slightly extended Ludo ruleset (including capture-before-home and team blocks) for both free-for-all and team modes.
+- This environment implements a slightly extended Ludo ruleset (including capture-before-home and team blocks) for both single and team modes.
 - For a complete, up-to-date description of all movement, capture, blocking, safe-square, and team rules, see the dedicated rules document:  
   **[Detailed Ludo rules](LUDO_RULES.md)**
 
