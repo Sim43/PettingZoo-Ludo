@@ -1,8 +1,7 @@
 import os
 import time
-import threading
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
@@ -295,16 +294,8 @@ def main():
         if episode % 100 == 0:
             obs, mask, actions, old_logp, returns, advantages, old_values = batch
             avg_return = returns.mean().item()
-            print(f"Episode {episode} | Batch transitions {obs.shape[0]} | Avg return {avg_return:.3f} | Entropy {ENTROPY_COEF:.3f}")
-
-        # -------- render evaluation game (non-blocking) --------
-        if episode % RENDER_EVERY == 0:
-            def eval_game():
-                eval_env = ludo_env(render_mode="human")
-                _ = run_episode_collect(eval_env, model, render=True)
-                eval_env.close()
-            threading.Thread(target=eval_game, daemon=True).start()
-
+            print(f"Episode {episode} | Batch transitions {obs.shape[0]} | Avg return {avg_return:.3f}")
+            
 
 if __name__ == "__main__":
     main()

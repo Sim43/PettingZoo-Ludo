@@ -223,6 +223,9 @@ class raw_env(AECEnv, EzPickle):
 
         self.current_dice = 0
         self.consecutive_sixes = {a: 0 for a in self.agents}
+        # Per-turn dice banking: stores all dice available to each agent for the
+        # current turn (including across chained extra turns).
+        self.dice_bank = {a: [] for a in self.agents}
 
         self.has_captured = {a: False for a in self.agents}
 
@@ -608,22 +611,45 @@ class raw_env(AECEnv, EzPickle):
     # ------------------------------------------------------------
 
     def _roll_new_dice(self):
-        """Roll a new dice for the current agent and handle three-sixes penalty."""
+        """Roll dice for the current agent and bank them with a three-sixes penalty.
+
+        Dice banking rules:
+          * Rolling a 6 does NOT immediately move a piece; it is added to the
+            agent's dice bank and the agent rolls again.
+          * Rolling a non-6 ends the roll attempt and is added to the bank.
+          * Dice bank persists across chained extra turns.
+
+        Three-sixes penalty (per roll attempt):
+          * If the agent rolls three consecutive 6s in this *single* roll
+            attempt, all dice from this attempt are discarded, but any dice
+            already in the bank from earlier in the turn are preserved.
+        """
+        agent = self.agent_selection
+        attempt_dice = []
+        six_count = 0
+
         while True:
-            agent = self.agent_selection
-            roll = self.np_random.integers(1, 7)
-            self.current_dice = roll
+            roll = int(self.np_random.integers(1, 7))
             if roll == 6:
-                self.consecutive_sixes[agent] += 1
+                six_count += 1
+                if six_count >= 3:
+                    # Three-sixes penalty: discard this attempt entirely.
+                    attempt_dice = []
+                    break
+                attempt_dice.append(6)
             else:
-                self.consecutive_sixes[agent] = 0
+                attempt_dice.append(roll)
+                break
 
-            if self.consecutive_sixes[agent] >= 3:
-                self.consecutive_sixes[agent] = 0
-                self.agent_selection = self._agent_selector.next()
-                continue
+        if attempt_dice:
+            self.dice_bank[agent].extend(attempt_dice)
 
-            break
+        # Expose one die to the observation / legal move logic. For now we use
+        # the first die in the bank; remaining dice stay available in the bank.
+        if self.dice_bank[agent]:
+            self.current_dice = self.dice_bank[agent][0]
+        else:
+            self.current_dice = 0
 
     # ------------------------------------------------------------
     # Step
@@ -665,6 +691,8 @@ class raw_env(AECEnv, EzPickle):
         # point. The guard is kept for robustness but should normally be dead
         # code.
         if action not in legal:
+            # Illegal action ends the turn and clears any remaining banked dice.
+            self.dice_bank[agent] = []
             self.agent_selection = self._agent_selector.next()
             self._roll_new_dice()
             # No rewards have been written for this step; accumulate (zeros) and
@@ -676,9 +704,21 @@ class raw_env(AECEnv, EzPickle):
         finished_this_move = False
 
         if action == 4:
+            # PASS: end the turn, clear any remaining banked dice for this agent.
+            self.dice_bank[agent] = []
             self.agent_selection = self._agent_selector.next()
             self._roll_new_dice()
             return
+
+        # Consume one die from the acting agent's dice bank for this move.
+        bank = self.dice_bank[agent]
+        if bank:
+            # By construction `current_dice` is always the first die in the bank.
+            die = bank.pop(0)
+            self.current_dice = die
+        else:
+            # No available die; treat as zero-move (no piece can legally move).
+            self.current_dice = 0
 
         zone, idx = self.piece_state[target_agent][action_piece_idx]
 
@@ -787,8 +827,11 @@ class raw_env(AECEnv, EzPickle):
 
         if not self._game_finished:
             if extra_turn:
+                # Extra turn: roll more dice into the existing bank for this agent.
                 self._roll_new_dice()
             else:
+                # Turn ends: clear any remaining banked dice before passing play.
+                self.dice_bank[agent] = []
                 self.agent_selection = self._agent_selector.next()
                 self._roll_new_dice()
 
