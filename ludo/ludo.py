@@ -17,12 +17,11 @@ This environment is a turn-based, multi-player board game environment compatible
 | Agents             | `agents = ['player_0', 'player_1', 'player_2', 'player_3']` |
 | Agents             | 2–4 (configurable)                                 |
 | Action Shape       | (1,)                                               |
-| Action Values      | Discrete(5)                                        |
-| Observation Shape  | (80,)                                              |
+| Action Values      | Discrete(65) = (4 pieces × 16 dice slots) + 1 PASS |
+| Observation Shape  | (86,)                                              |
 | Observation Values | [0, 1]                                             |
 
-Ludo is a classic 2–4 player race game. Each player has four pieces which start in a yard and must travel once around the shared main track and then along a player-specific home track. Players take turns rolling a single six-sided die and moving one of their pieces according to the roll. A roll of
-6 brings a piece out of the yard and also grants an extra turn.
+Ludo is a classic 2–4 player race game. Each player has four pieces which start in a yard and must travel once around the shared main track and then along a player-specific home track. Players use **dice banking**: rolling a 6 adds it to their bank and grants another roll; non-6 dice are also banked. Players explicitly choose which die from their bank to use for each move. Rolling three consecutive 6s cancels that roll attempt but preserves previously banked dice. Finishing a piece, capturing an enemy, or rolling a 6 grants an extra turn.
 
 ### Game Modes
 
@@ -34,23 +33,23 @@ The environment supports two modes via the `mode` parameter:
 
 ### Observation Space
 
-The observation is a **flat numpy array of length 80** (`dtype=np.float32`):
+The observation is a **flat numpy array of length 86** (`dtype=np.float32`):
 
-* **Indices 0–74**: Core game state encoding:
+* **Indices 0–69**: Core game state encoding:
   * **0–51**: Main-track occupancy (52 shared squares).
   * **52–67**: Each piece's zone (yard / main / home / finished) and progress across all players.
-  * **68**: Normalized dice value (`dice / 6.0`).
+  * **68**: Normalized current dice value (`dice / 6.0`).
   * **69**: `1.0` if it is this agent's turn, `0.0` otherwise.
-* **Indices 75–79**: Action mask (binary, `1.0` = legal, `0.0` = illegal) for actions 0–4.
+* **Indices 70–85**: Full dice bank (up to 16 dice), normalized (`dice / 6.0`). Unused slots are 0.
 
-The action mask is also exposed in `info["action_mask"]` as `np.int8` for compatibility with PettingZoo wrappers. Only the currently acting agent has a non-zero action mask. All other agents receive an all-zero mask.
+The action mask is exposed in `info["action_mask"]` as `np.int8` with length matching the action space. Only the currently acting agent has a non-zero action mask. All other agents receive an all-zero mask.
 
 #### Legal Actions Mask
 
-Legal moves for the current agent are given by the action mask (indices 75–79). The action space is `Discrete(5)`:
+Legal moves for the current agent are given by the action mask in `info["action_mask"]`. The action space is `Discrete(65)` encoding all `(piece_index, dice_index)` pairs plus PASS:
 
-* `0–3`: move the corresponding piece index (if legal),
-* `4`: PASS (only legal when no movement actions are available).
+* Actions `0..63`: `(piece_index, dice_index)` where `piece_index ∈ [0,3]` and `dice_index ∈ [0,15]` refers to a die in the agent's dice bank.
+* Action `64`: PASS (only legal when no movement actions are available).
 
 In teams mode, if an agent has all pieces finished, their action mask reflects their teammate's legal moves (dice-sharing).
 
@@ -58,7 +57,7 @@ Any action index with mask value 0 is illegal and, when taken, will terminate th
 
 ### Action Space
 
-The action space is the set of integers from 0 to 4 (inclusive). On each turn, the dice has already been rolled, and the agent chooses which piece to move (or is forced to PASS when no moves are available).
+The action space is `Discrete(65)` = `(4 pieces × 16 dice slots) + 1 PASS`. Agents explicitly choose both which piece to move and which die from their bank to use. Dice are banked when rolled (6s grant extra rolls; three consecutive 6s cancel that roll attempt but preserve prior banked dice). Dice remain in the bank across chained extra turns until consumed or the turn ends.
 
 ### Rewards
 
@@ -76,6 +75,7 @@ The action space is the set of integers from 0 to 4 (inclusive). On each turn, t
 ### Version History
 
 * v0: Initial release.
+* v1: Dice banking with explicit die selection. Action space expanded to `Discrete(65)` encoding `(piece, die_index)` pairs. Observation expanded to 86 elements including full dice bank.
 """
 
 from __future__ import annotations

@@ -3,6 +3,8 @@
 **PettingZoo-Ludo** is a turn-based multi-agent version of **Ludo** built on the PettingZoo AEC API and Gymnasium.  
 It supports 2–4 players in either single or fixed 2v2 teams.
 
+**Features**: Dice banking (agents explicitly choose which die to use), three-sixes penalty, extra turns from finishing/capturing/rolling 6, and dense reward shaping. See `train/README.md` for training examples.
+
 ![Ludo demo](assets/demo.gif)
 
 ---
@@ -49,6 +51,7 @@ for agent in e.agent_iter():
     if term or trunc:
         e.step(None)
         continue
+    # Action space: Discrete(65) = (piece, die_index) pairs + PASS
     action = int(info["action_mask"].argmax())  # simple legal action
     e.step(action)
 ```

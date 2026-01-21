@@ -24,7 +24,7 @@ def main():
         mode = "teams"
 
     game = env(render_mode="human", mode=mode)
-    game.reset(seed=43)
+    game.reset()
 
     print(f"Starting Ludo test in mode='{mode}'")
 
@@ -89,7 +89,6 @@ def main():
                 print(f"{rank}. {a} (reward={r})")
             break
 
-        time.sleep(0.1)
 
     game.close()
     print("\nTest finished.")
