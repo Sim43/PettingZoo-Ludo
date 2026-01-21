@@ -225,6 +225,10 @@ class raw_env(AECEnv, EzPickle):
         # This gates home entry per colour in both FFA and teams modes.
         self.has_captured = {a: False for a in self.agents}
 
+        # In free-for-all mode, track the order in which players finish all pieces.
+        # Used to assign rank-based rewards at the end of the episode.
+        self.finish_order = []
+
         # Roll dice for the first agent so there is always an active dice value
         self._roll_new_dice()
 
@@ -614,13 +618,50 @@ class raw_env(AECEnv, EzPickle):
                     self._accumulate_rewards()
                     return
         else:
-            # FFA mode: individual win
+            # FFA mode: rank-based terminal rewards (1st, 2nd, 3rd, last).
+            # We do NOT end the game as soon as the first player finishes.
+            # Instead:
+            # - Track the order in which players finish all pieces.
+            # - Continue play until all but one player have finished.
+            # - Then assign position-based rewards and terminate.
             if all(z == "finished" for z, _ in self.piece_state[agent]):
-                for a in self.agents:
-                    self.terminations[a] = True
-                    self.rewards[a] = 1 if a == agent else -1
-                self._accumulate_rewards()
-                return
+                # Record this agent's finishing position if not already recorded.
+                if agent not in self.finish_order:
+                    self.finish_order.append(agent)
+
+                # Once all but one player have finished, determine the last player
+                # and assign rewards by final rank.
+                if len(self.finish_order) >= self.num_players - 1:
+                    # The remaining player (who never finished) is last.
+                    remaining = [a for a in self.agents if a not in self.finish_order]
+                    if remaining:
+                        self.finish_order.extend(remaining)
+
+                    # Fixed rewards for up to 4 positions:
+                    # 1st:  +1.0
+                    # 2nd:  +0.3
+                    # 3rd:  -0.3
+                    # 4th+: -1.0
+                    rank_rewards = [1.0, 0.3, -0.3, -1.0]
+
+                    for idx, a in enumerate(self.finish_order):
+                        self.terminations[a] = True
+                        reward = (
+                            rank_rewards[idx]
+                            if idx < len(rank_rewards)
+                            else rank_rewards[-1]
+                        )
+                        self.rewards[a] = reward
+
+                    # Any agent not in finish_order (should not happen in normal play)
+                    # is treated as last place.
+                    for a in self.agents:
+                        if a not in self.finish_order:
+                            self.terminations[a] = True
+                            self.rewards[a] = rank_rewards[-1]
+
+                    self._accumulate_rewards()
+                    return
 
         # Extra turn conditions:
         # - rolling a 6
