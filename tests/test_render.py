@@ -37,10 +37,13 @@ def main():
         agent = game.agent_selection
         obs = game.observe(agent)
 
-        # Last 5 entries are the action mask, first 75 are the core observation
+        # Last 5 entries are the action mask, first 75 are the core observation.
+        # Keep this aligned with the environment's documented observation layout.
         mask = obs[75:]
         legal = [i for i, v in enumerate(mask) if v == 1]
-        dice = int(obs[68] * 6)
+        # Use the environment's internal dice state directly to avoid any
+        # decoding/rounding issues from the observation.
+        dice = getattr(game, "current_dice", 0)
 
         print(f"\nAgent: {agent}")
         print(f"Dice: {dice}")
@@ -62,10 +65,14 @@ def main():
                 winners = [a for a, r in game.rewards.items() if r > 0]
                 print(f"\n🏆 Winning team: {winners}")
             else:
-                # single mode: show final standings based on the new rank-based rewards.
+                # single mode: show final standings using cumulative rewards so that
+                # both rank-based rewards and shaping are reflected.
                 # Higher reward = better position.
+                rewards_source = getattr(
+                    game, "_cumulative_rewards", game.rewards
+                )
                 standings = sorted(
-                    game.rewards.items(), key=lambda x: x[1], reverse=True
+                    rewards_source.items(), key=lambda x: x[1], reverse=True
                 )
                 print("\n🏁 Final standings (single):")
                 for rank, (a, r) in enumerate(standings, start=1):
