@@ -17,6 +17,7 @@ NUM_ENVS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CHECKPOINT_PATH = "train/checkpoints/single.pt"
+BEST_CHECKPOINT_PATH = "train/checkpoints/single_best.pt"
 RENDER_EVERY = 1000  # episodes
 
 # PPO hyperparams
@@ -249,13 +250,30 @@ def ppo_update(model: ActorCritic, optimizer, batch, epochs: int, minibatch_size
 # ==============================
 # Main Training Loop
 # ==============================
-def save_checkpoint(model, optimizer, episode_count: int):
+def save_checkpoint(model, optimizer, episode_count: int, path: str = CHECKPOINT_PATH):
     payload = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "episode_count": episode_count,
     }
-    torch.save(payload, CHECKPOINT_PATH)
+    torch.save(payload, path)
+
+
+def save_best_checkpoint(model, optimizer, episode_count: int, avg_return: float):
+    """Save checkpoint if avg_return is the best seen so far."""
+    best_path = BEST_CHECKPOINT_PATH
+    best_return_path = BEST_CHECKPOINT_PATH.replace(".pt", "_return.txt")
+    
+    best_return = float("-inf")
+    if os.path.exists(best_return_path):
+        with open(best_return_path, "r") as f:
+            best_return = float(f.read().strip())
+    
+    if avg_return > best_return:
+        save_checkpoint(model, optimizer, episode_count, best_path)
+        with open(best_return_path, "w") as f:
+            f.write(str(avg_return))
+        print(f"New best checkpoint saved! Avg return: {avg_return:.3f} (prev: {best_return:.3f})")
 
 
 def load_checkpoint(model, optimizer):
@@ -301,9 +319,12 @@ def main():
         # -------- checkpoint overwrite --------
         save_checkpoint(model, optimizer, episode)
 
+        # -------- best checkpoint (save if improved) --------
+        obs, mask, actions, old_logp, returns, advantages, old_values = batch
+        avg_return = returns.mean().item()
+        save_best_checkpoint(model, optimizer, episode, avg_return)
+
         if episode % 100 == 0:
-            obs, mask, actions, old_logp, returns, advantages, old_values = batch
-            avg_return = returns.mean().item()
             print(f"Episode {episode} | Batch transitions {obs.shape[0]} | Avg return {avg_return:.3f}")
             
 
