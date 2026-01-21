@@ -9,7 +9,7 @@ def main():
     parser.add_argument(
         "--single",
         action="store_true",
-        help="Run in single-player free-for-all mode (default).",
+        help="Run in single-player single mode (default).",
     )
     parser.add_argument(
         "--team",
@@ -18,8 +18,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Default is single/FFA mode unless --team is explicitly requested
-    mode = "ffa"
+    # Default is single/single mode unless --team is explicitly requested
+    mode = "single"
     if args.team:
         mode = "teams"
 
@@ -31,16 +31,27 @@ def main():
     MAX_STEPS = 1000
     steps = 0
 
+    # Track full-episode returns by summing the per-step rewards dict, which is
+    # exactly what PettingZoo's api_test uses to reconstruct rewards.
+    episode_returns = {a: 0.0 for a in game.agents}
+
     while game.agents and steps < MAX_STEPS:
         steps += 1
 
         agent = game.agent_selection
         obs = game.observe(agent)
 
-        # Last 5 entries are the action mask, first 75 are the core observation
-        mask = obs[75:]
-        legal = [i for i, v in enumerate(mask) if v == 1]
-        dice = int(obs[68] * 6)
+        # Action mask is provided via infos and matches the discrete action
+        # space. Only legal (piece, die_index) pairs and PASS are marked as 1.
+        info = game.infos[agent]
+        mask = info.get("action_mask", None)
+        if mask is None:
+            legal = list(range(game.action_space(agent).n))
+        else:
+            legal = [i for i, v in enumerate(mask) if v == 1]
+        # Use the environment's internal dice state directly to avoid any
+        # decoding/rounding issues from the observation.
+        dice = getattr(game, "current_dice", 0)
 
         print(f"\nAgent: {agent}")
         print(f"Dice: {dice}")
@@ -56,23 +67,28 @@ def main():
 
         game.step(action)
 
+        # Accumulate per-step rewards into episode returns so that dense shaping
+        # and penalties across the whole game are reflected in the final totals.
+        for a, r in game.rewards.items():
+            episode_returns[a] = episode_returns.get(a, 0.0) + r
+
         if game.terminations[agent]:
-            # In teams mode, both teammates win together. Show all agents with positive reward.
+            # At the end of the game, show per-player episode returns so that
+            # both dense shaping and terminal rewards are visible.
+            rewards_source = episode_returns
+            standings = sorted(
+                rewards_source.items(), key=lambda x: x[1], reverse=True
+            )
+
             if mode == "teams":
-                winners = [a for a, r in game.rewards.items() if r > 0]
-                print(f"\n🏆 Winning team: {winners}")
+                print("\n🏆 Final standings (teams, per-player rewards):")
             else:
-                # FFA mode: show final standings based on the new rank-based rewards.
-                # Higher reward = better position.
-                standings = sorted(
-                    game.rewards.items(), key=lambda x: x[1], reverse=True
-                )
-                print("\n🏁 Final standings (FFA):")
-                for rank, (a, r) in enumerate(standings, start=1):
-                    print(f"{rank}. {a} (reward={r})")
+                print("\n🏁 Final standings (single, per-player rewards):")
+
+            for rank, (a, r) in enumerate(standings, start=1):
+                print(f"{rank}. {a} (reward={r})")
             break
 
-        time.sleep(0.1)
 
     game.close()
     print("\nTest finished.")

@@ -19,7 +19,7 @@ from ludo.ludo import env
 
 
 def test_api():
-    """Basic PettingZoo AEC API compliance test (free-for-all mode)."""
+    """Basic PettingZoo AEC API compliance test (single mode)."""
     api_test(env(), num_cycles=1000, verbose_progress=False)
 
 
@@ -41,28 +41,3 @@ def test_render():
 def test_performance_benchmark():
     """Performance benchmark (manual inspection; skipped by default)."""
     performance_benchmark(env())
-
-
-def test_save_observation():
-    """Minimal save-observation-style test to ensure obs can be materialized."""
-    e = env()
-    e.reset()
-    for _ in range(e.num_agents * 5):
-        agent = e.agent_selection
-        obs, rew, term, trunc, info = e.last()
-
-        # Top-level observation is a flat numpy array
-        arr = np.asarray(obs)
-        assert arr.size > 0
-
-        if term or trunc:
-            e.step(None)
-        else:
-            # Derive action mask from the last 5 elements of the observation vector
-            space = e.observation_space(agent)
-            n = space.shape[0]
-            mask = arr[n - 5 :]
-            legal = [i for i, v in enumerate(mask) if v == 1]
-            action = legal[0] if legal else None
-            e.step(action)
-

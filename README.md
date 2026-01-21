@@ -1,14 +1,15 @@
 ## PettingZoo Ludo Environment
 
-**PettingZoo-Ludo** is a third-party, turn-based multi-agent environment that implements the board game **Ludo** using the PettingZoo AEC API and Gymnasium spaces. It is designed as a standalone package that can be listed in PettingZoo's third-party registry.
+**PettingZoo-Ludo** is a turn-based multi-agent version of **Ludo** built on the PettingZoo AEC API and Gymnasium.  
+It supports 2–4 players in either single or fixed 2v2 teams.
+
+**Features**: Dice banking (agents explicitly choose which die to use), three-sixes penalty, extra turns from finishing/capturing/rolling 6, and dense reward shaping. See `train/README.md` for training examples.
 
 ![Ludo demo](assets/demo.gif)
 
 ---
 
-## Installation
-
-- **Clone and install in editable mode**:
+## Install
 
 ```bash
 git clone https://github.com/Sim43/PettingZoo-Ludo.git
@@ -16,173 +17,64 @@ cd PettingZoo-Ludo
 pip install -e .
 ```
 
-- **Runtime dependencies** (also listed in `setup.py`):
-  - **Python**: 3.8+
-  - **PettingZoo** `>=1.24.0`
-  - **Gymnasium** `>=1.0.0`
-  - **NumPy** `>=1.21.0`
-  - **pygame** `>=2.1.0`
-
-Testing and tooling dependencies include `pytest`, `jinja2`, `typeguard`, `lark`, and `setuptools`.
-
 ---
 
-## Quickstart
+## Quick commands
 
-**Basic usage (no rendering, free-for-all by default):**
+- **Create the environment in Python**:
 
 ```python
-from ludo.ludo import env
-
-# Free-for-all mode (default)
-env = env()
-env.reset(seed=42)
-
-for agent in env.agent_iter():
-    observation, reward, termination, truncation, info = env.last()
-    if termination or truncation:
-        action = None
-    else:
-        # Use action mask to select a legal action
-        mask = info.get("action_mask", None)
-        if mask is not None:
-            legal_actions = [i for i, v in enumerate(mask) if v == 1]
-            action = legal_actions[0] if legal_actions else 0
-        else:
-            action = env.action_space(agent).sample()
-    env.step(action)
+from ludo import env
+env = env(mode="single")  # or mode="teams"
 ```
 
-**With human rendering (and optional team mode):**
-
-```python
-from ludo.ludo import env
-
-# Free-for-all
-env = env(render_mode="human")
-env.reset()
-for agent in env.agent_iter():
-    observation, reward, termination, truncation, info = env.last()
-    if termination or truncation:
-        action = None
-    else:
-        mask = info.get("action_mask", None)
-        legal = [i for i, v in enumerate(mask) if v == 1] if mask is not None else []
-        action = legal[0] if legal else 0
-    env.step(action)
-env.close()
-
-# 2v2 teams: (player_0, player_2) vs (player_1, player_3)
-env = env(render_mode="human", mode="teams")
-env.reset()
-for agent in env.agent_iter():
-    observation, reward, termination, truncation, info = env.last()
-    if termination or truncation:
-        action = None
-    else:
-        mask = info.get("action_mask", None)
-        legal = [i for i, v in enumerate(mask) if v == 1] if mask is not None else []
-        action = legal[0] if legal else 0
-    env.step(action)
-env.close()
-```
-
----
-
-## Environment details
-
-### Agents, turns, and game modes
-
-- **Agents**: up to **4 players** (`"player_0"`–`"player_3"`), configurable via `num_players` in `raw_env.__init__`.
-- **Turn order**: sequential, managed with PettingZoo's `agent_selector`.
-- **Three sixes rule**: three consecutive rolls of 6 for the same player cause their turn to be skipped and the dice reset.
--- **Game modes**:
-  - **Free-for-all** (`mode="ffa"`, default): each player is an independent agent competing to finish all of their own pieces first.
-  - **Teams** (`mode="teams"`): fixed 2v2 teams:
-    - Team 0: `player_0` (Green) and `player_2` (Blue)
-    - Team 1: `player_1` (Yellow) and `player_3` (Red)
-    - When all pieces of both teammates are finished, the team wins and the episode terminates.
-    - In teams mode, finished agents still take turns and may use their dice rolls to move **their teammate's** pieces (dice-sharing).
-
-### Action space
-
-- **Per-agent action space**: `gymnasium.spaces.Discrete(5)`
-  - **0–3**: move the corresponding piece index (0–3).
-  - **4**: **PASS**, only legal when no movement actions are available.
-- Illegal actions are handled by `TerminateIllegalWrapper`, which uses an **action mask** to determine legal actions.
-
-### Observation space
-
-- **Per-agent observation space**: `gymnasium.spaces.Box(0.0, 1.0, shape=(80,), dtype=np.float32)`
-  - A **flat vector of length 80**:
-    - **First 75 entries**: core board and game-state features.
-    - **Last 5 entries**: binary **action mask** for actions 0–4.
-- Key encoding details (see `ludo/ludo.py` for exact logic):
-  - **Indices 0–51**: main-track occupancy (shared 52 squares).
-  - **Indices 52–67**: piece zones and progress (yard / main / home / finished) across all players.
-  - **Index 68**: normalized dice value (`dice / 6.0`).
-  - **Index 69**: `1.0` if it is this agent's turn, `0.0` otherwise.
-  - **Indices 75–79**: action mask (1.0 = legal, 0.0 = illegal) exposed in the observation and as `info["action_mask"]` with `dtype=np.int8` for sampling.
-
-### Rewards and termination
-
-- **Rewards (free-for-all)**:
-  - **+1** for the winning agent (all 4 pieces finished).
-  - **-1** for each losing agent at game end.
-  - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
-  - **0** for all other intermediate moves.
-- **Rewards (teams)**:
-  - **+1** for each agent on the winning team (both teammates have all 4 pieces finished).
-  - **-1** for each agent on the losing team.
-  - **-1** for an illegal move (via `TerminateIllegalWrapper`) for the acting agent.
-  - **0** for all other intermediate moves.
-- **Terminations**:
-  - **Free-for-all**: episode ends when any player gets all four pieces to the final home position.
-  - **Teams**: episode ends when all pieces of both teammates on a team are finished.
-  - In both modes, per-agent `terminations[agent]` flags are used, as required by the AEC API.
-- **Truncations**:
-  - Currently no built-in `max_cycles`; `truncations` remain `False` unless integrated into a higher-level wrapper.
-
-### Ludo-specific rules
-
-- This environment implements a slightly extended Ludo ruleset (including capture-before-home and team blocks) for both free-for-all and team modes.
-- For a complete, up-to-date description of all movement, capture, blocking, safe-square, and team rules, see the dedicated rules document:  
-  **[Detailed Ludo rules](LUDO_RULES.md)**
-
----
-
-## Rendering
-
-- **Render modes** (in `raw_env.metadata`):
-  - `"human"`: Pygame window with a graphical board and pieces.
-  - `"rgb_array"`: returns an `H x W x 3` NumPy array of the current frame.
-- **Assets**:
-  - Board and piece sprites are located in `ludo/img/` and loaded via `pygame`.
-  - `assets/demo.gif` shows an example playthrough.
-- **Notes**:
-  - Rendering requires a display-capable environment when using `"human"`.
-  - The environment scales the board and pieces to a fixed window size (~800x800).
-
----
-
-## Testing and development
-
-- **API compliance and regression tests** are provided under `tests/`:
-  - `tests/test_ludo_compliance.py`:
-    - PettingZoo **API compliance test** (`api_test`).
-    - **Seed test** (`seed_test`) for determinism.
-    - Optional performance benchmark and basic save-observation loop.
-  - `tests/test_render.py`:
-    - Simple script to run the environment with `"human"` rendering and random legal actions.
-
-- **Run tests locally**:
+- **Run API/compliance tests**:
 
 ```bash
-pytest -v
+pytest tests/test_ludo_compliance.py
 ```
+
+- **Run a simple render test**:
+
+```bash
+pytest tests/test_render.py
+```
+
+- **Quick random play loop with rendering** (Python shell or script):
+
+```python
+from ludo import env
+e = env(render_mode="human")
+e.reset()
+for agent in e.agent_iter():
+    obs, rew, term, trunc, info = e.last()
+    if term or trunc:
+        e.step(None)
+        continue
+    # Action space: Discrete(65) = (piece, die_index) pairs + PASS
+    action = int(info["action_mask"].argmax())  # simple legal action
+    e.step(action)
+```
+
+For the Ludo rules implemented here (capture requirement, safe squares, team blocks, three-sixes rule), see `LUDO_RULES.md`.
+
+---
+
+## Reward structure (summary)
+
+| **Category**             | **Trigger**                                           | **Reward (single)**                                         | **Reward (Teams)**                                  |
+|-------------------------|-------------------------------------------------------|----------------------------------------------------------|-----------------------------------------------------|
+| Terminal rank           | Finish 1st / 2nd / 3rd / 4th                          | +1.00 / +0.30 / −0.30 / −1.00                            | Winning team: +1 each, losing team: −1 each        |
+| Capture (shaping)       | You capture an enemy piece                            | +0.02 / +0.03 / +0.06 / +0.08 (by enemy progress, capped at +0.25 per opponent/episode) | Same                                                |
+| Got captured (penalty)  | One of your pieces is captured                        | −0.02 / −0.03 / −0.06 / −0.08 (by your progress)         | Same                                                |
+| Finish a piece          | A piece reaches its final home position               | +0.10, +0.08, +0.06, +0.04 (per colour, 1st–4th piece)   | Same                                                |
+| Leave yard (shaping)    | Leave yard while you already have ≥1 active piece and the move is not forced | +0.02                                  | Same                                                |
+| Threat-aware exposure   | After your move, a piece is capturable next enemy turn (not on safe) | Up to about −0.08, scaled by risk and progress          | Same                                                |
+| Loop-waste              | Piece completes a full loop before any capture for that colour | −0.20 per wasted loop per piece                          | Same                                                |
+| Illegal move            | Action outside the legal action mask                  | −1 for acting agent (via wrapper)                        | Same                                                |
 
 ---
 
 ## License
 
-- This project is licensed under the terms of the license in `LICENSE` (currently **MIT** unless changed). Please review that file for full details.
+This project is licensed under the terms in `LICENSE` (MIT).***
