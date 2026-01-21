@@ -711,10 +711,12 @@ class raw_env(AECEnv, EzPickle):
             return
 
         # Consume one die from the acting agent's dice bank for this move.
+        # Dice order is flexible: we are free to pick any die from the bank.
         bank = self.dice_bank[agent]
         if bank:
-            # By construction `current_dice` is always the first die in the bank.
-            die = bank.pop(0)
+            # Simple policy: use the largest die available, then remove it.
+            die = max(bank)
+            bank.remove(die)
             self.current_dice = die
         else:
             # No available die; treat as zero-move (no piece can legally move).
