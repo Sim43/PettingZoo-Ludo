@@ -45,7 +45,7 @@ After the capture requirement is satisfied (see below), any move that goes beyon
 ### Blocks
 
 - A **block** is 2 or more aligned pieces that cannot be captured and that block passage on **non-safe** squares:
-  - **single** (`mode="single"`):
+  - **Free-for-all** (`mode="ffa"`):
     - A block is **two or more pieces of the same colour** on a main square.
   - **Teams mode** (`mode="teams"`):
     - A block is **two or more pieces from the same team** on a main square, possibly split across teammates.
@@ -69,7 +69,7 @@ Each colour must **individually** capture at least one enemy piece before any of
 - A per-colour flag is tracked internally:
   - `has_captured[agent] = False` initially for every colour.
   - When `agent` captures any enemy piece once, `has_captured[agent]` is set to `True` and never reset for the rest of the game.
-- This rule applies in both **single** and **teams** mode:
+- This rule applies in both **FFA** and **teams** mode:
   - In teams mode, captures are **not shared** between teammates.
   - A capture by `player_0` does **not** unlock home entry for `player_2`, and vice versa.
 
@@ -115,7 +115,7 @@ This capture-unlock behaviour is **irreversible** per colour.
   - The dice is reset to 0 for that player.
   - The turn immediately advances to the next agent, who then rolls.
 
-This rule applies in both single and teams mode.
+This rule applies in both FFA and teams mode.
 
 ---
 
@@ -127,13 +127,13 @@ A player may receive an immediate extra turn in the following cases:
 - They **capture** an enemy piece on their move.
 - They **finish** a piece by moving it into the final home position on that move.
 
-These conditions are per colour and apply identically in both single and teams modes, subject to the usual team and capture rules.
+These conditions are per colour and apply identically in both free-for-all and teams modes, subject to the usual team and capture rules.
 
 ---
 
 ## Game Modes and Team-Specific Rules
 
-### single (`mode="single"`)
+### Free-for-all (`mode="ffa"`)
 
 - Each colour is an **independent agent**.
 - Win condition:

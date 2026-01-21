@@ -19,7 +19,7 @@ from ludo.ludo import env
 
 
 def test_api():
-    """Basic PettingZoo AEC API compliance test (single mode)."""
+    """Basic PettingZoo AEC API compliance test (free-for-all mode)."""
     api_test(env(), num_cycles=1000, verbose_progress=False)
 
 
