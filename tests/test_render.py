@@ -24,12 +24,16 @@ def main():
         mode = "teams"
 
     game = env(render_mode="human", mode=mode)
-    game.reset()
+    game.reset(seed=43)
 
     print(f"Starting Ludo test in mode='{mode}'")
 
     MAX_STEPS = 1000
     steps = 0
+
+    # Track full-episode returns by summing the per-step rewards dict, which is
+    # exactly what PettingZoo's api_test uses to reconstruct rewards.
+    episode_returns = {a: 0.0 for a in game.agents}
 
     while game.agents and steps < MAX_STEPS:
         steps += 1
@@ -59,24 +63,26 @@ def main():
 
         game.step(action)
 
+        # Accumulate per-step rewards into episode returns so that dense shaping
+        # and penalties across the whole game are reflected in the final totals.
+        for a, r in game.rewards.items():
+            episode_returns[a] = episode_returns.get(a, 0.0) + r
+
         if game.terminations[agent]:
-            # In teams mode, both teammates win together. Show all agents with positive reward.
+            # At the end of the game, show per-player episode returns so that
+            # both dense shaping and terminal rewards are visible.
+            rewards_source = episode_returns
+            standings = sorted(
+                rewards_source.items(), key=lambda x: x[1], reverse=True
+            )
+
             if mode == "teams":
-                winners = [a for a, r in game.rewards.items() if r > 0]
-                print(f"\n🏆 Winning team: {winners}")
+                print("\n🏆 Final standings (teams, per-player rewards):")
             else:
-                # single mode: show final standings using cumulative rewards so that
-                # both rank-based rewards and shaping are reflected.
-                # Higher reward = better position.
-                rewards_source = getattr(
-                    game, "_cumulative_rewards", game.rewards
-                )
-                standings = sorted(
-                    rewards_source.items(), key=lambda x: x[1], reverse=True
-                )
-                print("\n🏁 Final standings (single):")
-                for rank, (a, r) in enumerate(standings, start=1):
-                    print(f"{rank}. {a} (reward={r})")
+                print("\n🏁 Final standings (single, per-player rewards):")
+
+            for rank, (a, r) in enumerate(standings, start=1):
+                print(f"{rank}. {a} (reward={r})")
             break
 
         time.sleep(0.1)

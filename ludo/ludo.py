@@ -638,10 +638,10 @@ class raw_env(AECEnv, EzPickle):
 
         agent = self.agent_selection
 
-        # PettingZoo AEC pattern: start each live-agent step by clearing per-step
-        # rewards and zeroing that agent's cumulative reward. The tests then
-        # reconstruct the value returned by :meth:`last` by summing
-        # ``env.rewards`` between calls.
+        # PettingZoo AEC pattern: start each live-agent step by clearing the
+        # per-step rewards dict and zeroing the acting agent's cumulative
+        # reward. Shaping rewards for non-acting agents are already preserved
+        # in ``_cumulative_rewards`` and are not affected by this.
         self._clear_rewards()
         self._cumulative_rewards[agent] = 0.0
 
