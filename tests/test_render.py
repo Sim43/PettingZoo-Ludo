@@ -9,7 +9,7 @@ def main():
     parser.add_argument(
         "--single",
         action="store_true",
-        help="Run in single-player free-for-all mode (default).",
+        help="Run in single-player single mode (default).",
     )
     parser.add_argument(
         "--team",
@@ -18,8 +18,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Default is single/FFA mode unless --team is explicitly requested
-    mode = "ffa"
+    # Default is single/single mode unless --team is explicitly requested
+    mode = "single"
     if args.team:
         mode = "teams"
 
@@ -62,12 +62,12 @@ def main():
                 winners = [a for a, r in game.rewards.items() if r > 0]
                 print(f"\n🏆 Winning team: {winners}")
             else:
-                # FFA mode: show final standings based on the new rank-based rewards.
+                # single mode: show final standings based on the new rank-based rewards.
                 # Higher reward = better position.
                 standings = sorted(
                     game.rewards.items(), key=lambda x: x[1], reverse=True
                 )
-                print("\n🏁 Final standings (FFA):")
+                print("\n🏁 Final standings (single):")
                 for rank, (a, r) in enumerate(standings, start=1):
                     print(f"{rank}. {a} (reward={r})")
             break

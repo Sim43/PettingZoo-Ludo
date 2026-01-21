@@ -28,7 +28,7 @@ Ludo is a classic 2–4 player race game. Each player has four pieces which star
 
 The environment supports two modes via the `mode` parameter:
 
-* **Free-for-all** (`mode="ffa"`, default): Each player competes individually. The first player to bring all four pieces to their final home position wins.
+* **single** (`mode="single"`, default): Each player competes individually. Players are ranked by the order in which they finish all four pieces.
 
 * **Teams** (`mode="teams"`): Fixed 2v2 team-based play. Teams: (player_0, player_2) vs (player_1, player_3). A team wins when both teammates finish all four pieces. Teammates cannot capture each other but can form team blocks (2+ pieces from the same team on a square). Finished agents can use their dice rolls to move their teammate's pieces (dice-sharing).
 
@@ -62,17 +62,16 @@ The action space is the set of integers from 0 to 4 (inclusive). On each turn, t
 
 ### Rewards
 
-**Free-for-all mode:**
-* Winning agent: +1
-* Losing agents: -1
-* Illegal move: -1 for the acting agent (via wrapper), 0 for others
-* All other intermediate moves: 0
+**single mode:**
+* Terminal ranks (1st / 2nd / 3rd / 4th): +1.00 / +0.30 / −0.30 / −1.00
+* Illegal move: −1 for the acting agent (via wrapper), 0 for others
+* All other moves: 0, plus dense shaping (captures, being captured, finishing pieces, leaving the yard, threat exposure, and loop waste).
 
 **Teams mode:**
 * Winning team (both teammates): +1 for each agent on the winning team
-* Losing team: -1 for each agent on the losing team
-* Illegal move: -1 for the acting agent (via wrapper), 0 for others
-* All other intermediate moves: 0
+* Losing team: −1 for each agent on the losing team
+* Illegal move: −1 for the acting agent (via wrapper), 0 for others
+* All other moves: 0, plus the same shaping terms as in single (terminal rewards remain ±1 for the two teams).
 
 ### Version History
 
@@ -129,10 +128,10 @@ TEAM_MAP = {
 
 class raw_env(AECEnv, EzPickle):
     """
-    Ludo environment supporting both free-for-all (FFA) and 2v2 team-based modes.
+    Ludo environment supporting both single (single) and 2v2 team-based modes.
     
     Modes:
-    - mode="ffa" (default): Classic free-for-all where each player competes individually.
+    - mode="single" (default): Classic single where each player competes individually.
       First player to finish all pieces wins.
     - mode="teams": 2v2 cooperative-competitive mode. Teams: (player_0, player_2) vs (player_1, player_3).
       Team wins when both teammates finish all pieces. Teammates cannot capture each other but can form blocks.
@@ -152,12 +151,12 @@ class raw_env(AECEnv, EzPickle):
     SAFE_SQUARES = {0, 8, 13, 21, 26, 34, 39, 47}
     START_INDEX = [0, 13, 26, 39]
 
-    def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="ffa"):
+    def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="single"):
         EzPickle.__init__(self, num_players, render_mode, screen_scaling, mode)
         super().__init__()
 
         assert 2 <= num_players <= 4
-        assert mode in ("ffa", "teams"), f"mode must be 'ffa' or 'teams', got '{mode}'"
+        assert mode in ("single", "teams"), f"mode must be 'single' or 'teams', got '{mode}'"
         if mode == "teams":
             assert num_players == 4, "teams mode requires exactly 4 players"
         
@@ -222,12 +221,26 @@ class raw_env(AECEnv, EzPickle):
         self.consecutive_sixes = {a: 0 for a in self.agents}
 
         # Track whether each colour (agent) has captured at least one enemy piece.
-        # This gates home entry per colour in both FFA and teams modes.
+        # This gates home entry per colour in both single and teams modes.
         self.has_captured = {a: False for a in self.agents}
 
-        # In free-for-all mode, track the order in which players finish all pieces.
+        # In single mode, track the order in which players finish all pieces.
         # Used to assign rank-based rewards at the end of the episode.
         self.finish_order = []
+
+        # Reward-shaping state ---------------------------------------------
+        # Per-player count of finished pieces (for diminishing finish reward).
+        self.finished_pieces = {a: 0 for a in self.agents}
+        # Pre-capture total steps travelled on main track per piece (modulo one loop),
+        # used to detect "loop waste" before the first capture.
+        self.pre_capture_steps = {
+            a: [0] * self.PIECES for a in self.agents
+        }
+        # Per-(captor, victim) accumulator for capture-shaping rewards, to cap
+        # total bonus per opponent per episode.
+        self.capture_reward_tracker = {
+            a: {b: 0.0 for b in self.agents if b != a} for a in self.agents
+        }
 
         # Roll dice for the first agent so there is always an active dice value
         self._roll_new_dice()
@@ -322,7 +335,7 @@ class raw_env(AECEnv, EzPickle):
         return None
 
     def _is_enemy(self, agent, other):
-        """Return True if other is an enemy of agent (different team in teams mode, different agent in FFA)."""
+        """Return True if other is an enemy of agent (different team in teams mode, different agent in single)."""
         if not self.team_mode:
             return agent != other
         return not self._same_team(agent, other)
@@ -343,12 +356,12 @@ class raw_env(AECEnv, EzPickle):
     def _is_any_block(self, pos):
         """Return True if any block (2+ aligned pieces) is on this main-track position.
 
-        - FFA: blocks are per colour (2+ pieces of the same agent).
+        - single: blocks are per colour (2+ pieces of the same agent).
         - Teams mode: blocks are per team (2+ pieces from the same team, possibly split across teammates).
         """
         pieces = self._pieces_on_main(pos)
         if not self.team_mode:
-            # Free-for-all: count per agent/colour.
+            # single: count per agent/colour.
             counts = {}
             for a, _ in pieces:
                 counts[a] = counts.get(a, 0) + 1
@@ -367,7 +380,7 @@ class raw_env(AECEnv, EzPickle):
         """Return True if an enemy block (2+ aligned pieces) is on this main-track position."""
         pieces = self._pieces_on_main(pos)
         if not self.team_mode:
-            # FFA: count per enemy colour.
+            # single: count per enemy colour.
             counts = {}
             for a, _ in pieces:
                 if not self._is_enemy(agent, a):
@@ -394,6 +407,143 @@ class raw_env(AECEnv, EzPickle):
                 if zone == "main" and idx == pos:
                     return True
         return False
+
+    # ------------------------------------------------------------
+    # Progress / reward-shaping helpers
+    # ------------------------------------------------------------
+
+    def _progress_to_home(self, agent, piece_idx, zone, idx):
+        """
+        Normalized progress-to-home s in [0, 1] for the given piece:
+        s = 0 at start square, s = 1 at colour-specific home-entry.
+        """
+        if zone == "yard" or idx is None:
+            return 0.0
+
+        # Finished or in the home track: treat as at/after home entry.
+        if zone in ("home", "finished"):
+            return 1.0
+
+        # On main track: distance depends on whether this colour has captured yet.
+        start_idx = self.START_INDEX[self.agents.index(agent)]
+        if self.has_captured[agent]:
+            steps = self.distance[agent][piece_idx]
+        else:
+            steps = (idx - start_idx) % self.MAIN_TRACK_LEN
+
+        denom = max(self.MAIN_TRACK_LEN - 1, 1)
+        s = steps / denom
+        return float(min(1.0, max(0.0, s)))
+
+    def _apply_capture_rewards(self, captor, victim, victim_s):
+        """
+        Shaping for captures / being captured.
+        - Captor gets a small bonus bucketed by victim's progress.
+        - Victim gets a symmetric penalty bucketed by its own progress.
+        - Captor's bonus vs a given victim is capped to +0.25 per episode.
+        """
+        # Bucketed bonus for capturing a further-advanced piece.
+        if victim_s < 0.2:
+            base_bonus = 0.02
+        elif victim_s < 0.6:
+            base_bonus = 0.03
+        elif victim_s < 0.9:
+            base_bonus = 0.06
+        else:
+            base_bonus = 0.08
+
+        # Cap cumulative bonus per (captor, victim) pair.
+        used = self.capture_reward_tracker.get(captor, {}).get(victim, 0.0)
+        remaining = 0.25 - used
+        if remaining <= 0.0:
+            bonus = 0.0
+        else:
+            bonus = min(base_bonus, remaining)
+
+        if bonus > 0.0:
+            self.rewards[captor] += bonus
+            self.capture_reward_tracker[captor][victim] = used + bonus
+
+        # Penalty for the captured player, bucketed by its own progress.
+        if victim_s < 0.2:
+            penalty = -0.02
+        elif victim_s < 0.6:
+            penalty = -0.03
+        elif victim_s < 0.9:
+            penalty = -0.06
+        else:
+            penalty = -0.08
+        self.rewards[victim] += penalty
+
+    def _apply_finish_piece_reward(self, mover, owner):
+        """
+        Shaping for finishing individual pieces: +0.10, +0.08, +0.06, +0.04
+        for the 1st–4th finished piece of a colour (applied to the mover).
+        """
+        count = self.finished_pieces[owner] + 1
+        self.finished_pieces[owner] = count
+        rewards = [0.10, 0.08, 0.06, 0.04]
+        idx = min(count - 1, len(rewards) - 1)
+        self.rewards[mover] += rewards[idx]
+
+    def _next_enemy_agent(self, agent):
+        """Return the next enemy in turn order who will act before `agent` gets another turn."""
+        n = len(self.agents)
+        if n <= 1:
+            return None
+        start = self.agents.index(agent)
+        for offset in range(1, n):
+            idx = (start + offset) % n
+            other = self.agents[idx]
+            if self.terminations.get(other, False) or self.truncations.get(other, False):
+                continue
+            if self._is_enemy(agent, other):
+                return other
+        return None
+
+    def _apply_threat_penalty(self, mover, owner, piece_idx):
+        """
+        Threat-aware penalty: after the move, if the moved piece is capturable
+        next enemy turn (not on a safe square), apply:
+            penalty = -0.48 * p * (0.5 + 0.5 * s)
+        where p = 1 / 6^k, k is the number of exact rolls required this turn.
+        We conservatively consider only a single-roll capture (k = 1),
+        and clamp the penalty into [-0.08, 0].
+        """
+        zone, idx = self.piece_state[owner][piece_idx]
+        if zone != "main" or idx in self.SAFE_SQUARES:
+            return
+
+        enemy = self._next_enemy_agent(mover)
+        if enemy is None:
+            return
+
+        # Check if any enemy main-track piece can capture in one roll (k = 1).
+        capturable = False
+        for z_e, pos_e in self.piece_state[enemy]:
+            if z_e != "main":
+                continue
+            # Distance along main track (modulo wrap) from enemy to this piece.
+            d = (idx - pos_e) % self.MAIN_TRACK_LEN
+            if 1 <= d <= 6:
+                # Final square must be capturable (not safe, no block).
+                if idx in self.SAFE_SQUARES:
+                    continue
+                if self._is_any_block(idx):
+                    continue
+                capturable = True
+                break
+
+        if not capturable:
+            return
+
+        # k = 1 (one exact roll in this turn), p = 1/6.
+        p = 1.0 / 6.0
+        s = self._progress_to_home(owner, piece_idx, zone, idx)
+        penalty = -0.48 * p * (0.5 + 0.5 * s)
+        # Clamp to [-0.08, 0].
+        penalty = max(-0.08, min(0.0, penalty))
+        self.rewards[mover] += penalty
 
     def _legal_actions(self, agent, target_agent=None):
         """
@@ -549,13 +699,34 @@ class raw_env(AECEnv, EzPickle):
 
         if zone == "yard":
             start = self.START_INDEX[self.agents.index(target_agent)]
+
+            # Leave-yard shaping: reward only if there is already at least one
+            # active piece and the move is not forced (i.e. other moves exist).
+            active_pieces = sum(
+                1 for z, _ in self.piece_state[target_agent] if z in ("main", "home")
+            )
+            forced = len(legal) == 1
+            if active_pieces >= 1 and not forced:
+                self.rewards[agent] += 0.02
+
             self.piece_state[target_agent][action_piece_idx] = ("main", start)
             self.distance[target_agent][action_piece_idx] = 0
+            self.pre_capture_steps[target_agent][action_piece_idx] = 0
 
         elif zone == "main":
             roll = self.current_dice
             if not self.has_captured[target_agent]:
                 # Pre-capture: home entry is blocked; always stay on main track and wrap using modulo.
+                # Also track total pre-capture distance to detect "loop waste".
+                old_steps = self.pre_capture_steps[target_agent][action_piece_idx]
+                new_steps = old_steps + roll
+                if old_steps < self.MAIN_TRACK_LEN and new_steps >= self.MAIN_TRACK_LEN:
+                    # One full loop completed without any capture yet for this colour.
+                    self.rewards[agent] -= 0.20
+                self.pre_capture_steps[target_agent][action_piece_idx] = (
+                    new_steps % self.MAIN_TRACK_LEN
+                )
+
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
                 self.piece_state[target_agent][action_piece_idx] = ("main", new_pos)
                 capture = self._check_capture(target_agent, new_pos)
@@ -596,6 +767,10 @@ class raw_env(AECEnv, EzPickle):
             else:
                 self.piece_state[target_agent][action_piece_idx] = ("home", new_idx)
 
+        # Finishing-piece shaping (applied after piece reaches finished).
+        if finished_this_move:
+            self._apply_finish_piece_reward(agent, target_agent)
+
         # Win check
         if self.team_mode:
             # Teams mode: check if both teammates have finished all pieces
@@ -618,7 +793,7 @@ class raw_env(AECEnv, EzPickle):
                     self._accumulate_rewards()
                     return
         else:
-            # FFA mode: rank-based terminal rewards (1st, 2nd, 3rd, last).
+            # single mode: rank-based terminal rewards (1st, 2nd, 3rd, last).
             # We do NOT end the game as soon as the first player finishes.
             # Instead:
             # - Track the order in which players finish all pieces.
@@ -663,6 +838,9 @@ class raw_env(AECEnv, EzPickle):
                     self._accumulate_rewards()
                     return
 
+        # Threat-aware exposure penalty for the moved piece (if game continues).
+        self._apply_threat_penalty(agent, target_agent, action_piece_idx)
+
         # Extra turn conditions:
         # - rolling a 6
         # - capturing an enemy piece
@@ -700,7 +878,7 @@ class raw_env(AECEnv, EzPickle):
         counts = {}
         indices = {}
         for a, i in pieces:
-            # In teams mode: skip teammates; in FFA: skip self
+            # In teams mode: skip teammates; in single: skip self
             if not self._is_enemy(agent, a):
                 continue
             counts[a] = counts.get(a, 0) + 1
@@ -714,6 +892,13 @@ class raw_env(AECEnv, EzPickle):
         for a, c in counts.items():
             if c == 1:
                 i = indices[a][0]
+
+                # Progress-based capture shaping (before resetting the piece).
+                victim_zone = "main"
+                victim_idx = pos
+                s_victim = self._progress_to_home(a, i, victim_zone, victim_idx)
+                self._apply_capture_rewards(agent, a, s_victim)
+
                 self.piece_state[a][i] = ("yard", None)
                 self.distance[a][i] = 0
                 # Mark that this colour has captured at least one enemy piece.
