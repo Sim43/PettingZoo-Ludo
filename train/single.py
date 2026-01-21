@@ -18,7 +18,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CHECKPOINT_PATH = "train/checkpoints/single.pt"
 BEST_CHECKPOINT_PATH = "train/checkpoints/single_best.pt"
-RENDER_EVERY = 1000  # episodes
 
 # PPO hyperparams
 GAMMA = 0.99
@@ -30,7 +29,7 @@ VALUE_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 
 # Rollout / update
-ROLLOUT_EPISODES_PER_ENV = 2   # collect this many full games per env before updating
+ROLLOUT_EPISODES_PER_ENV = 4   # collect this many full games per env before updating
 PPO_EPOCHS = 4                 # gradient passes over collected data
 MINIBATCH_SIZE = 2048          # transitions per minibatch (auto-clipped to data size)
 
@@ -209,7 +208,7 @@ def flatten_batch(per_env_data: List[Dict[str, List[Transition]]]):
     return obs, mask, actions, old_logp, returns, advantages, old_values
 
 
-def ppo_update(model: ActorCritic, optimizer, batch, epochs: int, minibatch_size: int):
+def ppo_update(model: ActorCritic, optimizer, batch, epochs: int, minibatch_size: int, entropy_coef: float):
     obs, mask, actions, old_logp, returns, advantages, old_values = batch
     N = obs.shape[0]
     minibatch_size = min(minibatch_size, N)
@@ -239,7 +238,7 @@ def ppo_update(model: ActorCritic, optimizer, batch, epochs: int, minibatch_size
 
             value_loss = 0.5 * (mb_returns - values).pow(2).mean()
 
-            loss = policy_loss + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
+            loss = policy_loss + VALUE_COEF * value_loss - entropy_coef * entropy
 
             optimizer.zero_grad()
             loss.backward()
@@ -314,7 +313,9 @@ def main():
             continue
 
         # -------- PPO update --------
-        ppo_update(model, optimizer, batch, epochs=PPO_EPOCHS, minibatch_size=MINIBATCH_SIZE)
+        # Entropy decay: start at 0.05, decay to 0.01 over 50k episodes
+        current_entropy = max(0.01, 0.05 * (1.0 - episode / 50000.0))
+        ppo_update(model, optimizer, batch, epochs=PPO_EPOCHS, minibatch_size=MINIBATCH_SIZE, entropy_coef=current_entropy)
 
         # -------- checkpoint overwrite --------
         save_checkpoint(model, optimizer, episode)
@@ -325,7 +326,8 @@ def main():
         save_best_checkpoint(model, optimizer, episode, avg_return)
 
         if episode % 100 == 0:
-            print(f"Episode {episode} | Batch transitions {obs.shape[0]} | Avg return {avg_return:.3f}")
+            current_entropy = max(0.01, 0.05 * (1.0 - episode / 50000.0))
+            print(f"Episode {episode} | Batch transitions {obs.shape[0]} | Avg return {avg_return:.3f} | Entropy coef {current_entropy:.3f}")
             
 
 if __name__ == "__main__":
