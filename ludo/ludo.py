@@ -137,22 +137,26 @@ class raw_env(AECEnv, EzPickle):
     MAIN_TRACK_LEN = 52
     HOME_LEN = 6
     PIECES = 4
+    # Maximum number of dice that can be *addressed* by the action space for a
+    # single agent's bank. The bank itself is unbounded; if more than this many
+    # dice are present, only the first MAX_DICE_SLOTS are selectable.
+    MAX_DICE_SLOTS = 16
 
     # Observation layout (see module docstring for high-level description)
     # Core slice [0, OBS_CORE_LEN):
     #   - [0, OBS_MAIN_LEN): main track occupancy
     #   - [OBS_MAIN_LEN, OBS_MAIN_LEN + OBS_PIECES_LEN): piece zones/progress
-    #   - OBS_DICE_IDX: normalized dice
+    #   - OBS_DICE_IDX: normalized current dice
     #   - OBS_TURN_IDX: turn flag
-    # Indices [70, 74] are currently unused/reserved but kept for backwards
-    # compatibility so that the total observation length remains 80 when
-    # concatenated with the 5-element action-mask slice.
+    # Indices [70, 70 + MAX_DICE_SLOTS) encode the full dice bank (up to
+    # MAX_DICE_SLOTS dice), normalized into [0, 1] via division by 6.0.
     OBS_MAIN_LEN = 52
     OBS_PIECES_LEN = 16
     OBS_DICE_IDX = 68
     OBS_TURN_IDX = 69
-    OBS_CORE_LEN = 75
-    OBS_TOTAL_LEN = 80
+    OBS_DICE_BANK_START = 70
+    OBS_CORE_LEN = 70 + MAX_DICE_SLOTS
+    OBS_TOTAL_LEN = OBS_CORE_LEN
 
     SAFE_SQUARES = {0, 8, 13, 21, 26, 34, 39, 47}
     START_INDEX = [0, 13, 26, 39]
@@ -180,7 +184,16 @@ class raw_env(AECEnv, EzPickle):
         self.agents = [f"player_{i}" for i in range(num_players)]
         self.possible_agents = self.agents[:]
 
-        self.action_spaces = {a: spaces.Discrete(5) for a in self.agents}
+        # Action encoding:
+        #   - For each piece index in [0, PIECES-1] and each dice index in
+        #     [0, MAX_DICE_SLOTS-1], we allocate one discrete action.
+        #   - One extra action id is reserved for PASS.
+        # The agent selects a single integer in [0, PASS_ACTION]; we decode it
+        # into (piece_index, dice_index) or PASS internally.
+        self.pass_action = self.PIECES * self.MAX_DICE_SLOTS
+        self.action_spaces = {
+            a: spaces.Discrete(self.pass_action + 1) for a in self.agents
+        }
         self.observation_spaces = {
             a: spaces.Box(0.0, 1.0, shape=(self.OBS_TOTAL_LEN,), dtype=np.float32)
             for a in self.agents
@@ -247,8 +260,11 @@ class raw_env(AECEnv, EzPickle):
     # ------------------------------------------------------------
 
     def observe(self, agent):
-        # Core observation buffer (without action mask).
-        obs = np.zeros(self.OBS_CORE_LEN, dtype=np.float32)
+        # Core observation buffer (without action mask). Total length is
+        # OBS_TOTAL_LEN; indices [0, OBS_CORE_LEN) are the core state, and the
+        # remaining slots are used for auxiliary information such as the dice
+        # bank summary.
+        obs = np.zeros(self.OBS_TOTAL_LEN, dtype=np.float32)
 
         # Encode how many pieces occupy each main-track square, normalized into [0, 1].
         # This preserves the distinction between singles and blocks instead of
@@ -290,7 +306,18 @@ class raw_env(AECEnv, EzPickle):
         obs[self.OBS_DICE_IDX] = self.current_dice / 6.0
         obs[self.OBS_TURN_IDX] = 1.0 if agent == self.agent_selection else 0.0
 
-        action_mask = np.zeros(5, dtype=np.int8)
+        # Encode the full dice bank (up to MAX_DICE_SLOTS dice) into the
+        # observation. Dice values are normalized into [0, 1] via division by
+        # 6.0; unused slots (if bank has fewer than MAX_DICE_SLOTS dice) are
+        # left at 0.
+        bank = self.dice_bank.get(agent, [])
+        for i in range(min(self.MAX_DICE_SLOTS, len(bank))):
+            obs[self.OBS_DICE_BANK_START + i] = bank[i] / 6.0
+
+        # Full action mask is provided via infos and matches the discrete action
+        # space. Only legal (piece, dice_index) pairs and PASS are marked as 1.
+        action_n = self.action_spaces[agent].n
+        action_mask = np.zeros(action_n, dtype=np.int8)
         if agent == self.agent_selection:
             if self.team_mode:
                 all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
@@ -299,7 +326,7 @@ class raw_env(AECEnv, EzPickle):
                     if teammate is not None:
                         legal = self._legal_actions(agent, target_agent=teammate)
                     else:
-                        legal = [4]  # No teammate, only PASS
+                        legal = [self.pass_action]  # No teammate, only PASS
                 else:
                     legal = self._legal_actions(agent)
             else:
@@ -310,7 +337,7 @@ class raw_env(AECEnv, EzPickle):
 
         self.infos[agent]["action_mask"] = action_mask
 
-        return np.concatenate([obs, action_mask.astype(np.float32)])
+        return obs
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -545,28 +572,26 @@ class raw_env(AECEnv, EzPickle):
         penalty = max(-0.08, min(0.0, penalty))
         self._grant_reward(mover, penalty)
 
-    def _legal_actions(self, agent, target_agent=None):
-        """Return legal actions for the current agent (or target agent in teams mode)."""
-        check_agent = target_agent if target_agent is not None else agent
-        
-        legal = []
+    def _legal_pieces_with_die(self, check_agent, die_value):
+        """Return legal piece indices for `check_agent` given a specific die value."""
+        legal_pieces = []
         for i, (zone, idx) in enumerate(self.piece_state[check_agent]):
             if zone == "finished":
                 continue
 
-            if zone == "yard" and self.current_dice == 6:
+            if zone == "yard" and die_value == 6:
                 start = self.START_INDEX[self.agents.index(check_agent)]
                 if start in self.SAFE_SQUARES:
                     blocked_entry = False
                 else:
                     blocked_entry = self._is_any_block(start)
                 if not blocked_entry:
-                    legal.append(i)
+                    legal_pieces.append(i)
 
             elif zone == "main":
                 if not self.has_captured[check_agent]:
                     blocked = False
-                    for step in range(1, self.current_dice + 1):
+                    for step in range(1, die_value + 1):
                         pos = (idx + step) % self.MAIN_TRACK_LEN
                         if pos in self.SAFE_SQUARES:
                             continue
@@ -574,17 +599,17 @@ class raw_env(AECEnv, EzPickle):
                             blocked = True
                             break
                     if not blocked:
-                        legal.append(i)
+                        legal_pieces.append(i)
                 else:
                     # After the first capture for this colour, pieces advance towards
                     # their home track using a distance measure. We allow moves up to
                     # and including those that land exactly on the final home square,
                     # but not beyond it.
-                    new_dist = self.distance[check_agent][i] + self.current_dice
+                    new_dist = self.distance[check_agent][i] + die_value
                     max_dist = (self.MAIN_TRACK_LEN - 2) + self.HOME_LEN
                     if new_dist <= max_dist:
                         blocked = False
-                        for step in range(1, self.current_dice + 1):
+                        for step in range(1, die_value + 1):
                             dist = self.distance[check_agent][i] + step
                             if dist > self.MAIN_TRACK_LEN - 2:
                                 break
@@ -595,16 +620,47 @@ class raw_env(AECEnv, EzPickle):
                                 blocked = True
                                 break
                         if not blocked:
-                            legal.append(i)
+                            legal_pieces.append(i)
 
             elif zone == "home":
-                if idx + self.current_dice < self.HOME_LEN:
-                    legal.append(i)
+                if idx + die_value < self.HOME_LEN:
+                    legal_pieces.append(i)
 
-        if not legal:
-            return [4]
+        return legal_pieces
 
-        return legal
+    def _encode_action(self, piece_idx, die_idx):
+        """Encode (piece_idx, die_idx) into a discrete action id."""
+        return piece_idx * self.MAX_DICE_SLOTS + die_idx
+
+    def _decode_action(self, action):
+        """Decode a discrete action id into ('pass', None, None) or ('move', piece, die_idx)."""
+        if action == self.pass_action:
+            return "pass", None, None
+        piece_idx = action // self.MAX_DICE_SLOTS
+        die_idx = action % self.MAX_DICE_SLOTS
+        return "move", piece_idx, die_idx
+
+    def _legal_actions(self, agent, target_agent=None):
+        """Return legal discrete actions for the current agent."""
+        check_agent = target_agent if target_agent is not None else agent
+
+        bank = self.dice_bank.get(agent, [])
+        legal_actions = []
+
+        # For each die in the bank (up to MAX_DICE_SLOTS), compute which pieces
+        # are legal to move with that die and encode (piece, die_index) pairs.
+        for die_idx, die_value in enumerate(bank[: self.MAX_DICE_SLOTS]):
+            legal_pieces = self._legal_pieces_with_die(check_agent, die_value)
+            for piece_idx in legal_pieces:
+                # Guard against malformed piece indices.
+                if 0 <= piece_idx < self.PIECES:
+                    legal_actions.append(self._encode_action(piece_idx, die_idx))
+
+        # If no (piece, die) pair is legal, only PASS is legal.
+        if not legal_actions:
+            return [self.pass_action]
+
+        return legal_actions
 
     # ------------------------------------------------------------
     # Dice handling
@@ -672,15 +728,17 @@ class raw_env(AECEnv, EzPickle):
         self._cumulative_rewards[agent] = 0.0
 
         target_agent = agent
-        action_piece_idx = action
+        mode, action_piece_idx, die_idx = self._decode_action(action)
         all_finished = False
         if self.team_mode:
             all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
             if all_finished:
                 teammate = self._get_teammate(agent)
                 if teammate is not None:
+                    # Finished agents reuse their dice to move a teammate's
+                    # pieces; we keep the decoded `action_piece_idx` and only
+                    # retarget which agent's piece_state we index into.
                     target_agent = teammate
-                    action_piece_idx = action
 
         legal = self._legal_actions(
             agent,
@@ -703,23 +761,19 @@ class raw_env(AECEnv, EzPickle):
         capture = False
         finished_this_move = False
 
-        if action == 4:
+        if mode == "pass":
             # PASS: end the turn, clear any remaining banked dice for this agent.
             self.dice_bank[agent] = []
             self.agent_selection = self._agent_selector.next()
             self._roll_new_dice()
             return
-
-        # Consume one die from the acting agent's dice bank for this move.
-        # Dice order is flexible: we are free to pick any die from the bank.
+        # Consume the explicitly chosen die from the acting agent's dice bank.
         bank = self.dice_bank[agent]
-        if bank:
-            # Simple policy: use the largest die available, then remove it.
-            die = max(bank)
-            bank.remove(die)
+        if 0 <= die_idx < len(bank):
+            die = bank.pop(die_idx)
             self.current_dice = die
         else:
-            # No available die; treat as zero-move (no piece can legally move).
+            # No available die at this index; treat as illegal via empty move.
             self.current_dice = 0
 
         zone, idx = self.piece_state[target_agent][action_piece_idx]

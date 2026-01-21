@@ -41,10 +41,14 @@ def main():
         agent = game.agent_selection
         obs = game.observe(agent)
 
-        # Last 5 entries are the action mask, first 75 are the core observation.
-        # Keep this aligned with the environment's documented observation layout.
-        mask = obs[75:]
-        legal = [i for i, v in enumerate(mask) if v == 1]
+        # Action mask is provided via infos and matches the discrete action
+        # space. Only legal (piece, die_index) pairs and PASS are marked as 1.
+        info = game.infos[agent]
+        mask = info.get("action_mask", None)
+        if mask is None:
+            legal = list(range(game.action_space(agent).n))
+        else:
+            legal = [i for i, v in enumerate(mask) if v == 1]
         # Use the environment's internal dice state directly to avoid any
         # decoding/rounding issues from the observation.
         dice = getattr(game, "current_dice", 0)

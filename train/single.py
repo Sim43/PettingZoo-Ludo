@@ -38,8 +38,18 @@ MINIBATCH_SIZE = 2048          # transitions per minibatch (auto-clipped to data
 # Actor-Critic Network
 # ==============================
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim=80, act_dim=5):
+    def __init__(self, obs_dim=None, act_dim=None):
         super().__init__()
+        if obs_dim is None or act_dim is None:
+            # Infer observation and action dimensions from a temporary environment
+            # instance so that changes to the Ludo environment are picked up
+            # automatically.
+            tmp_env = ludo_env(render_mode=None)
+            if obs_dim is None:
+                obs_dim = tmp_env.observation_space("player_0").shape[0]
+            if act_dim is None:
+                act_dim = tmp_env.action_space("player_0").n
+            tmp_env.close()
         self.shared = nn.Sequential(
             nn.Linear(obs_dim, 256),
             nn.ReLU(),
