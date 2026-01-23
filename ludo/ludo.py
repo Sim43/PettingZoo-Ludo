@@ -939,7 +939,12 @@ class raw_env(AECEnv, EzPickle):
 
         self._apply_threat_penalty(agent, target_agent, action_piece_idx)
 
-        extra_turn = self.current_dice == 6 or capture or finished_this_move
+        # Extra turn is granted for:
+        # - Capturing an enemy piece
+        # - Finishing a piece
+        # Note: Rolling a 6 grants an extra roll (handled in _roll_new_dice), but using
+        # a banked 6 does NOT grant an extra turn - that would be double-counting.
+        extra_turn = capture or finished_this_move
 
         if self.render_mode == "human":
             self.render()

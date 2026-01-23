@@ -400,15 +400,29 @@ def save_best_checkpoint(model, optimizer, scheduler, episode_count: int, win_ra
 
 
 def load_checkpoint(model, optimizer, scheduler, checkpoint_path: Optional[str] = None):
-    """Load checkpoint from specified path or default CHECKPOINT_PATH."""
+    """Load checkpoint from specified path or default CHECKPOINT_PATH.
+    
+    Args:
+        model: Model to load weights into
+        optimizer: Optimizer to load state (can be None for evaluation)
+        scheduler: Scheduler to load state (can be None for evaluation)
+        checkpoint_path: Path to checkpoint file (optional)
+    
+    Returns:
+        Episode count from checkpoint
+    """
     path = checkpoint_path or CHECKPOINT_PATH
     if not os.path.exists(path):
         return 0
     payload = torch.load(path, map_location=DEVICE, weights_only=True)
     model.load_state_dict(payload["model"])
-    optimizer.load_state_dict(payload["optimizer"])
-    if scheduler and payload.get("scheduler") is not None:
+    
+    # Only load optimizer/scheduler if provided (needed for training, not evaluation)
+    if optimizer is not None and "optimizer" in payload:
+        optimizer.load_state_dict(payload["optimizer"])
+    if scheduler is not None and payload.get("scheduler") is not None:
         scheduler.load_state_dict(payload["scheduler"])
+    
     return int(payload.get("episode_count", 0))
 
 
