@@ -12,10 +12,13 @@ setup(
         "gymnasium>=1.0.0",
         "numpy>=1.21.0",
         "pygame>=2.1.0",
-        "pytest>=7.0.0",
-        "jinja2>=3.0.0",
-        "typeguard>=3.0.0",
-        "setuptools>=69.0.0",
-        "lark",
-    ]
+        "torch>=2.0.0",  # PyTorch for training scripts
+    ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0.0",
+            "jinja2>=3.0.0",
+            "typeguard>=3.0.0",
+        ],
+    },
 )

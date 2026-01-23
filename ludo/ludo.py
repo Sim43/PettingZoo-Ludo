@@ -160,6 +160,22 @@ class raw_env(AECEnv, EzPickle):
 
     SAFE_SQUARES = {0, 8, 13, 21, 26, 34, 39, 47}
     START_INDEX = [0, 13, 26, 39]
+    
+    # Reward shaping constants
+    REWARD_FINISH_PIECE = [0.10, 0.08, 0.06, 0.04]
+    REWARD_LEAVE_YARD = 0.02
+    REWARD_LOOP_WASTE = -0.20
+    REWARD_CAPTURE_CAP = 0.25
+    REWARD_THREAT_MAX = -0.08
+    REWARD_THREAT_FACTOR = 0.48
+    REWARD_RANK = [1.0, 0.3, -0.3, -1.0]
+    
+    # Observation encoding constants
+    OBS_HOME_BASE = 0.8
+    OBS_HOME_DIVISOR = 30.0
+    
+    # Capture reward thresholds: (threshold, reward_value)
+    CAPTURE_REWARD_THRESHOLDS = [(0.2, 0.02), (0.6, 0.03), (0.9, 0.06), (1.0, 0.08)]
 
     def __init__(self, num_players=4, render_mode=None, screen_scaling=8, mode="single"):
         EzPickle.__init__(self, num_players, render_mode, screen_scaling, mode)
@@ -176,13 +192,12 @@ class raw_env(AECEnv, EzPickle):
         self.mode = mode
         self.team_mode = (mode == "teams")
         
-        if self.team_mode:
-            self.team_map = {a: TEAM_MAP[a] for a in [f"player_{i}" for i in range(4)]}
-        else:
-            self.team_map = {}
+        self.team_map = {f"player_{i}": TEAM_MAP[f"player_{i}"] for i in range(4)} if self.team_mode else {}
 
         self.agents = [f"player_{i}" for i in range(num_players)]
         self.possible_agents = self.agents[:]
+        # Cache agent indices for faster lookups
+        self._agent_indices = {a: i for i, a in enumerate(self.agents)}
 
         # Action encoding:
         #   - For each piece index in [0, PIECES-1] and each dice index in
@@ -212,6 +227,8 @@ class raw_env(AECEnv, EzPickle):
         self.np_random = np.random.default_rng(seed)
 
         self.agents = self.possible_agents[:]
+        # Rebuild agent indices cache
+        self._agent_indices = {a: i for i, a in enumerate(self.agents)}
         self.rewards = {a: 0 for a in self.agents}
         self._cumulative_rewards = {a: 0 for a in self.agents}
         self.terminations = {a: False for a in self.agents}
@@ -239,6 +256,8 @@ class raw_env(AECEnv, EzPickle):
         # Per-turn dice banking: stores all dice available to each agent for the
         # current turn (including across chained extra turns).
         self.dice_bank = {a: [] for a in self.agents}
+        # Track if three sixes were rolled (ends turn immediately)
+        self.three_sixes_rolled = {a: False for a in self.agents}
 
         self.has_captured = {a: False for a in self.agents}
 
@@ -281,18 +300,27 @@ class raw_env(AECEnv, EzPickle):
             board = np.clip(board / float(self.PIECES), 0.0, 1.0)
         obs[: self.OBS_MAIN_LEN] = board
 
+        # Observation encoding functions for each zone type
+        def encode_yard(idx):
+            return 0.0
+        def encode_main(idx):
+            return (idx + 1) / float(self.MAIN_TRACK_LEN)
+        def encode_home(idx):
+            return self.OBS_HOME_BASE + idx / self.OBS_HOME_DIVISOR
+        def encode_finished(idx):
+            return 1.0
+        
+        encoders = {
+            "yard": encode_yard,
+            "main": encode_main,
+            "home": encode_home,
+            "finished": encode_finished
+        }
+        
         offset = self.OBS_MAIN_LEN
         for a in self.possible_agents:
             for zone, idx in self.piece_state[a]:
-                if zone == "yard":
-                    obs[offset] = 0.0
-                elif zone == "main":
-                    obs[offset] = (idx + 1) / float(self.MAIN_TRACK_LEN)
-                elif zone == "home":
-                    # Encode home progress in (0.8, 1.0) and stay within [0, 1]
-                    obs[offset] = 0.8 + idx / 30.0
-                else:
-                    obs[offset] = 1.0
+                obs[offset] = encoders.get(zone, encode_finished)(idx)
                 offset += 1
 
         # Defensive check: if the layout above changes (e.g., different number of
@@ -319,18 +347,10 @@ class raw_env(AECEnv, EzPickle):
         action_n = self.action_spaces[agent].n
         action_mask = np.zeros(action_n, dtype=np.int8)
         if agent == self.agent_selection:
-            if self.team_mode:
-                all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
-                if all_finished:
-                    teammate = self._get_teammate(agent)
-                    if teammate is not None:
-                        legal = self._legal_actions(agent, target_agent=teammate)
-                    else:
-                        legal = [self.pass_action]  # No teammate, only PASS
-                else:
-                    legal = self._legal_actions(agent)
-            else:
-                legal = self._legal_actions(agent)
+            target = None
+            if self.team_mode and self._all_pieces_finished(agent):
+                target = self._get_teammate(agent)
+            legal = self._legal_actions(agent, target_agent=target) if target or not self.team_mode else [self.pass_action]
             
             for a in legal:
                 action_mask[a] = 1
@@ -372,6 +392,10 @@ class raw_env(AECEnv, EzPickle):
         if not self.team_mode:
             return agent != other
         return not self._same_team(agent, other)
+    
+    def _all_pieces_finished(self, agent):
+        """Check if all pieces of an agent are finished."""
+        return all(z == "finished" for z, _ in self.piece_state[agent])
 
     # ------------------------------------------------------------
     # Legal actions
@@ -386,46 +410,45 @@ class raw_env(AECEnv, EzPickle):
                     pieces.append((a, i))
         return pieces
 
-    def _is_any_block(self, pos):
-        """True if any block (2+ aligned pieces) is on this main-track position."""
-        pieces = self._pieces_on_main(pos)
+    def _count_pieces_by_group(self, pieces, filter_func=None):
+        """Count pieces grouped by agent (single mode) or team (teams mode).
+        
+        Args:
+            pieces: List of (agent, piece_idx) tuples
+            filter_func: Optional function to filter pieces before counting
+        
+        Returns:
+            Dictionary mapping group identifier to count
+        """
+        if filter_func:
+            pieces = [(a, i) for a, i in pieces if filter_func(a)]
+        
         if not self.team_mode:
-            # single: count per agent/colour.
+            # Single mode: count per agent/colour
             counts = {}
             for a, _ in pieces:
                 counts[a] = counts.get(a, 0) + 1
-            return any(c >= 2 for c in counts.values())
+            return counts
         else:
-            # Teams: count per team id so teammates can form team blocks.
+            # Teams mode: count per team id
             team_counts = {}
             for a, _ in pieces:
                 team_id = self.team_map.get(a)
-                if team_id is None:
-                    continue
-                team_counts[team_id] = team_counts.get(team_id, 0) + 1
-            return any(c >= 2 for c in team_counts.values())
+                if team_id is not None:
+                    team_counts[team_id] = team_counts.get(team_id, 0) + 1
+            return team_counts
+
+    def _is_any_block(self, pos):
+        """True if any block (2+ aligned pieces) is on this main-track position."""
+        pieces = self._pieces_on_main(pos)
+        counts = self._count_pieces_by_group(pieces)
+        return any(c >= 2 for c in counts.values())
 
     def _is_enemy_block(self, agent, pos):
         """True if an enemy block is on this main-track position."""
         pieces = self._pieces_on_main(pos)
-        if not self.team_mode:
-            # single: count per enemy colour.
-            counts = {}
-            for a, _ in pieces:
-                if not self._is_enemy(agent, a):
-                    continue
-                counts[a] = counts.get(a, 0) + 1
-            return any(c >= 2 for c in counts.values())
-        else:
-            # Teams: count per enemy team id.
-            agent_team = self.team_map.get(agent)
-            team_counts = {}
-            for a, _ in pieces:
-                team_id = self.team_map.get(a)
-                if team_id is None or team_id == agent_team:
-                    continue
-                team_counts[team_id] = team_counts.get(team_id, 0) + 1
-            return any(c >= 2 for c in team_counts.values())
+        counts = self._count_pieces_by_group(pieces, filter_func=lambda a: self._is_enemy(agent, a))
+        return any(c >= 2 for c in counts.values())
 
     def _is_enemy_occupied(self, agent, pos):
         """True if any enemy piece is on a given main-track position."""
@@ -449,7 +472,7 @@ class raw_env(AECEnv, EzPickle):
         if zone in ("home", "finished"):
             return 1.0
 
-        start_idx = self.START_INDEX[self.agents.index(agent)]
+        start_idx = self.START_INDEX[self._agent_indices[agent]]
         if self.has_captured[agent]:
             steps = self.distance[agent][piece_idx]
         else:
@@ -459,19 +482,19 @@ class raw_env(AECEnv, EzPickle):
         s = steps / denom
         return float(min(1.0, max(0.0, s)))
 
+    def _get_capture_reward(self, victim_s):
+        """Get capture reward value based on victim progress."""
+        for threshold, reward in self.CAPTURE_REWARD_THRESHOLDS:
+            if victim_s < threshold:
+                return reward
+        return 0.08  # Default for victim_s >= 1.0
+
     def _apply_capture_rewards(self, captor, victim, victim_s):
         """Apply capture shaping to captor and victim, capped per pair."""
-        if victim_s < 0.2:
-            base_bonus = 0.02
-        elif victim_s < 0.6:
-            base_bonus = 0.03
-        elif victim_s < 0.9:
-            base_bonus = 0.06
-        else:
-            base_bonus = 0.08
+        base_bonus = self._get_capture_reward(victim_s)
 
         used = self.capture_reward_tracker.get(captor, {}).get(victim, 0.0)
-        remaining = 0.25 - used
+        remaining = self.REWARD_CAPTURE_CAP - used
         if remaining <= 0.0:
             bonus = 0.0
         else:
@@ -482,14 +505,7 @@ class raw_env(AECEnv, EzPickle):
             self.capture_reward_tracker[captor][victim] = used + bonus
 
         # Defer penalty for victim to apply when they act
-        if victim_s < 0.2:
-            penalty = -0.02
-        elif victim_s < 0.6:
-            penalty = -0.03
-        elif victim_s < 0.9:
-            penalty = -0.06
-        else:
-            penalty = -0.08
+        penalty = -self._get_capture_reward(victim_s)
         # Apply victim penalty immediately into per-step rewards; it will be
         # surfaced to the victim on their next `last()` call via
         # `_cumulative_rewards` (PettingZoo AEC semantics).
@@ -499,9 +515,8 @@ class raw_env(AECEnv, EzPickle):
         """Shaping for finishing pieces with diminishing rewards."""
         count = self.finished_pieces[owner] + 1
         self.finished_pieces[owner] = count
-        rewards = [0.10, 0.08, 0.06, 0.04]
-        idx = min(count - 1, len(rewards) - 1)
-        self._grant_reward(mover, rewards[idx])
+        idx = min(count - 1, len(self.REWARD_FINISH_PIECE) - 1)
+        self._grant_reward(mover, self.REWARD_FINISH_PIECE[idx])
 
     def _grant_reward(self, recipient, amount):
         """Grant a shaping or terminal reward to `recipient` for the current step.
@@ -524,7 +539,7 @@ class raw_env(AECEnv, EzPickle):
         if n <= 1:
             return []
 
-        start = self.agents.index(agent)
+        start = self._agent_indices[agent]
         enemies = []
         for offset in range(1, n):
             idx = (start + offset) % n
@@ -546,12 +561,18 @@ class raw_env(AECEnv, EzPickle):
             return
 
         # Aggregate capture probability from *all* enemy pieces behind within 6+6+5 squares.
+        # Distance calculation accounts for wrap-around: we want the clockwise distance
+        # from enemy piece to our piece (enemy is behind if distance is 1-17 squares).
         p_total = 0.0
         for enemy in enemy_agents:
             for z_e, pos_e in self.piece_state[enemy]:
                 if z_e != "main":
                     continue
+                # Calculate clockwise distance: (our_pos - enemy_pos) mod track_length
+                # This gives distance enemy needs to travel to reach our position
                 d = (idx - pos_e) % self.MAIN_TRACK_LEN
+                if d == 0:
+                    continue  # Same position, skip
                 if 1 <= d <= 6:
                     if idx in self.SAFE_SQUARES:
                         continue
@@ -567,9 +588,9 @@ class raw_env(AECEnv, EzPickle):
             return
 
         s = self._progress_to_home(owner, piece_idx, zone, idx)
-        penalty = -0.48 * p_total * (0.5 + 0.5 * s)
-        # Clamp to [-0.08, 0].
-        penalty = max(-0.08, min(0.0, penalty))
+        penalty = -self.REWARD_THREAT_FACTOR * p_total * (0.5 + 0.5 * s)
+        # Clamp to [REWARD_THREAT_MAX, 0].
+        penalty = max(self.REWARD_THREAT_MAX, min(0.0, penalty))
         self._grant_reward(mover, penalty)
 
     def _legal_pieces_with_die(self, check_agent, die_value):
@@ -580,12 +601,8 @@ class raw_env(AECEnv, EzPickle):
                 continue
 
             if zone == "yard" and die_value == 6:
-                start = self.START_INDEX[self.agents.index(check_agent)]
-                if start in self.SAFE_SQUARES:
-                    blocked_entry = False
-                else:
-                    blocked_entry = self._is_any_block(start)
-                if not blocked_entry:
+                start = self.START_INDEX[self._agent_indices[check_agent]]
+                if start in self.SAFE_SQUARES or not self._is_any_block(start):
                     legal_pieces.append(i)
 
             elif zone == "main":
@@ -612,6 +629,12 @@ class raw_env(AECEnv, EzPickle):
                         for step in range(1, die_value + 1):
                             dist = self.distance[check_agent][i] + step
                             if dist > self.MAIN_TRACK_LEN - 2:
+                                # Entering home track - check if home entry is blocked
+                                # Home entry is at the square just before the home track
+                                entry_pos = (idx + step) % self.MAIN_TRACK_LEN
+                                if entry_pos not in self.SAFE_SQUARES and self._is_any_block(entry_pos):
+                                    blocked = True
+                                    break
                                 break
                             pos = (idx + step) % self.MAIN_TRACK_LEN
                             if pos in self.SAFE_SQUARES:
@@ -623,7 +646,9 @@ class raw_env(AECEnv, EzPickle):
                             legal_pieces.append(i)
 
             elif zone == "home":
-                if idx + die_value < self.HOME_LEN:
+                # Legal if the move stays within home track (idx + die_value <= HOME_LEN - 1)
+                # or finishes the piece (idx + die_value == HOME_LEN - 1)
+                if idx + die_value <= self.HOME_LEN - 1:
                     legal_pieces.append(i)
 
         return legal_pieces
@@ -679,18 +704,21 @@ class raw_env(AECEnv, EzPickle):
           * If the agent rolls three consecutive 6s in this *single* roll
             attempt, all dice from this attempt are discarded, but any dice
             already in the bank from earlier in the turn are preserved.
+          * The turn ends immediately (skipped).
         """
         agent = self.agent_selection
         attempt_dice = []
         six_count = 0
+        self.three_sixes_rolled[agent] = False
 
         while True:
             roll = int(self.np_random.integers(1, 7))
             if roll == 6:
                 six_count += 1
                 if six_count >= 3:
-                    # Three-sixes penalty: discard this attempt entirely.
+                    # Three-sixes penalty: discard this attempt entirely and end turn.
                     attempt_dice = []
+                    self.three_sixes_rolled[agent] = True
                     break
                 attempt_dice.append(6)
             else:
@@ -699,6 +727,9 @@ class raw_env(AECEnv, EzPickle):
 
         if attempt_dice:
             self.dice_bank[agent].extend(attempt_dice)
+            # Limit bank size to MAX_DICE_SLOTS to prevent unbounded growth
+            if len(self.dice_bank[agent]) > self.MAX_DICE_SLOTS:
+                self.dice_bank[agent] = self.dice_bank[agent][:self.MAX_DICE_SLOTS]
 
         # Expose one die to the observation / legal move logic. For now we use
         # the first die in the bank; remaining dice stay available in the bank.
@@ -706,6 +737,34 @@ class raw_env(AECEnv, EzPickle):
             self.current_dice = self.dice_bank[agent][0]
         else:
             self.current_dice = 0
+
+    # ------------------------------------------------------------
+    # Step helpers
+    # ------------------------------------------------------------
+
+    def _end_turn(self, agent, accumulate=True):
+        """End the current turn: clear dice bank, move to next agent, roll new dice."""
+        self.dice_bank[agent] = []
+        self.agent_selection = self._agent_selector.next()
+        self._roll_new_dice()
+        if accumulate:
+            self._accumulate_rewards()
+
+    def _validate_action_params(self, agent, die_idx, piece_idx, bank):
+        """Validate action parameters. Returns True if valid, False otherwise."""
+        if not (0 <= die_idx < len(bank)):
+            return False
+        if not (0 <= piece_idx < self.PIECES):
+            return False
+        return True
+
+    def _assign_rank_rewards(self):
+        """Assign terminal rank rewards to all agents based on finish order."""
+        self._game_finished = True
+        for idx, a in enumerate(self.finish_order):
+            r = self.REWARD_RANK[idx] if idx < len(self.REWARD_RANK) else self.REWARD_RANK[-1]
+            self._grant_reward(a, r)
+            self.terminations[a] = True
 
     # ------------------------------------------------------------
     # Step
@@ -731,14 +790,20 @@ class raw_env(AECEnv, EzPickle):
         mode, action_piece_idx, die_idx = self._decode_action(action)
         all_finished = False
         if self.team_mode:
-            all_finished = all(z == "finished" for z, _ in self.piece_state[agent])
+            all_finished = self._all_pieces_finished(agent)
             if all_finished:
                 teammate = self._get_teammate(agent)
-                if teammate is not None:
+                if teammate is not None and not (self.terminations.get(teammate, False) or self.truncations.get(teammate, False)):
                     # Finished agents reuse their dice to move a teammate's
                     # pieces; we keep the decoded `action_piece_idx` and only
                     # retarget which agent's piece_state we index into.
                     target_agent = teammate
+                else:
+                    # Teammate is terminated or doesn't exist, can only pass
+                    if mode != "pass":
+                        # Treat as illegal action
+                        self._end_turn(agent)
+                        return
 
         legal = self._legal_actions(
             agent,
@@ -750,12 +815,7 @@ class raw_env(AECEnv, EzPickle):
         # code.
         if action not in legal:
             # Illegal action ends the turn and clears any remaining banked dice.
-            self.dice_bank[agent] = []
-            self.agent_selection = self._agent_selector.next()
-            self._roll_new_dice()
-            # No rewards have been written for this step; accumulate (zeros) and
-            # exit early.
-            self._accumulate_rewards()
+            self._end_turn(agent)
             return
 
         capture = False
@@ -763,30 +823,30 @@ class raw_env(AECEnv, EzPickle):
 
         if mode == "pass":
             # PASS: end the turn, clear any remaining banked dice for this agent.
-            self.dice_bank[agent] = []
-            self.agent_selection = self._agent_selector.next()
-            self._roll_new_dice()
+            self._end_turn(agent, accumulate=False)
             return
+        
         # Consume the explicitly chosen die from the acting agent's dice bank.
         bank = self.dice_bank[agent]
-        if 0 <= die_idx < len(bank):
-            die = bank.pop(die_idx)
-            self.current_dice = die
-        else:
-            # No available die at this index; treat as illegal via empty move.
-            self.current_dice = 0
+        if not self._validate_action_params(agent, die_idx, action_piece_idx, bank):
+            # Invalid parameters: abort move, end turn, clear bank
+            self._end_turn(agent)
+            return
+        
+        die = bank.pop(die_idx)
+        self.current_dice = die
 
         zone, idx = self.piece_state[target_agent][action_piece_idx]
 
         if zone == "yard":
-            start = self.START_INDEX[self.agents.index(target_agent)]
+            start = self.START_INDEX[self._agent_indices[target_agent]]
 
             active_pieces = sum(
                 1 for z, _ in self.piece_state[target_agent] if z in ("main", "home")
             )
             forced = len(legal) == 1
             if active_pieces >= 1 and not forced:
-                self._grant_reward(agent, 0.02)
+                self._grant_reward(agent, self.REWARD_LEAVE_YARD)
 
             self.piece_state[target_agent][action_piece_idx] = ("main", start)
             self.distance[target_agent][action_piece_idx] = 0
@@ -801,7 +861,7 @@ class raw_env(AECEnv, EzPickle):
                 loops_after = new_steps // self.MAIN_TRACK_LEN
                 wasted_loops = max(0, loops_after - loops_before)
                 if wasted_loops > 0:
-                    self._grant_reward(agent, -0.20 * wasted_loops)
+                    self._grant_reward(agent, self.REWARD_LOOP_WASTE * wasted_loops)
                 self.pre_capture_steps[target_agent][action_piece_idx] = new_steps
 
                 new_pos = (idx + roll) % self.MAIN_TRACK_LEN
@@ -820,6 +880,11 @@ class raw_env(AECEnv, EzPickle):
                 else:
                     steps_to_entry = last_main_distance - current_dist
                     steps_in_home = roll - steps_to_entry - 1
+                    # Ensure steps_in_home is non-negative
+                    if steps_in_home < 0:
+                        # This shouldn't happen if legal moves are computed correctly,
+                        # but handle gracefully by finishing the piece
+                        steps_in_home = self.HOME_LEN - 1
                     if steps_in_home >= self.HOME_LEN - 1:
                         self.piece_state[target_agent][action_piece_idx] = ("finished", None)
                         finished_this_move = True
@@ -829,7 +894,8 @@ class raw_env(AECEnv, EzPickle):
 
         elif zone == "home":
             new_idx = idx + self.current_dice
-            if new_idx == self.HOME_LEN - 1:
+            if new_idx >= self.HOME_LEN - 1:
+                # Finish piece if we reach or exceed the final home square
                 self.piece_state[target_agent][action_piece_idx] = ("finished", None)
                 finished_this_move = True
             else:
@@ -844,10 +910,7 @@ class raw_env(AECEnv, EzPickle):
             team_id = self.team_map.get(target_agent)
             if team_id is not None:
                 team_agents = [a for a in self.agents if self.team_map.get(a) == team_id]
-                team_finished = all(
-                    all(z == "finished" for z, _ in self.piece_state[a])
-                    for a in team_agents
-                )
+                team_finished = all(self._all_pieces_finished(a) for a in team_agents)
                 if team_finished and not self._game_finished:
                     self._game_winner = team_id
                     self._game_finished = True
@@ -858,37 +921,45 @@ class raw_env(AECEnv, EzPickle):
                             self._grant_reward(a, -1.0)
                         self.terminations[a] = True
         else:
-            if all(z == "finished" for z, _ in self.piece_state[agent]):
+            if self._all_pieces_finished(agent):
                 if agent not in self.finish_order:
                     self.finish_order.append(agent)
 
-                if len(self.finish_order) >= self.num_players - 1 and not self._game_finished:
-                    remaining = [a for a in self.agents if a not in self.finish_order]
-                    if remaining:
-                        self.finish_order.extend(remaining)
-
-                    self._game_finished = True
-                    rank_rewards = [1.0, 0.3, -0.3, -1.0]
-                    for idx, a in enumerate(self.finish_order):
-                        r = rank_rewards[idx] if idx < len(rank_rewards) else rank_rewards[-1]
-                        self._grant_reward(a, r)
-                        self.terminations[a] = True
+                # Check if game should end: when all players have finished
+                # or when num_players - 1 have finished (last player is determined)
+                if not self._game_finished:
+                    finished_count = len(self.finish_order)
+                    if finished_count >= self.num_players - 1:
+                        # If exactly num_players - 1 finished, add remaining player
+                        if finished_count == self.num_players - 1:
+                            remaining = [a for a in self.agents if a not in self.finish_order]
+                            if remaining:
+                                self.finish_order.extend(remaining)
+                        self._assign_rank_rewards()
 
         self._apply_threat_penalty(agent, target_agent, action_piece_idx)
 
-        extra_turn = self.current_dice == 6 or capture or finished_this_move
+        # Extra turn is granted for:
+        # - Capturing an enemy piece
+        # - Finishing a piece
+        # Note: Rolling a 6 grants an extra roll (handled in _roll_new_dice), but using
+        # a banked 6 does NOT grant an extra turn - that would be double-counting.
+        extra_turn = capture or finished_this_move
 
         if self.render_mode == "human":
             self.render()
 
         if not self._game_finished:
-            if extra_turn:
-                # Extra turn: roll more dice into the existing bank for this agent.
-                self._roll_new_dice()
+            # Check for three-sixes penalty: if three sixes were rolled, end turn immediately
+            if self.three_sixes_rolled.get(agent, False):
+                # Three-sixes penalty: turn ends immediately, clear bank
+                self.three_sixes_rolled[agent] = False
+                self._end_turn(agent, accumulate=False)
+            elif not extra_turn:
+                # Turn ends normally: clear any remaining banked dice before passing play.
+                self._end_turn(agent, accumulate=False)
             else:
-                # Turn ends: clear any remaining banked dice before passing play.
-                self.dice_bank[agent] = []
-                self.agent_selection = self._agent_selector.next()
+                # Extra turn: roll more dice into the existing bank for this agent.
                 self._roll_new_dice()
 
         # Finally, roll per-step rewards into the cumulative buffer consumed by
@@ -941,14 +1012,18 @@ class raw_env(AECEnv, EzPickle):
                 # distance and pre_capture_steps for all of its pieces so that
                 # the two progress trackers remain consistent and home-entry
                 # behaviour matches the standard rules.
-                start_idx = self.START_INDEX[self.agents.index(agent)]
+                start_idx = self.START_INDEX[self._agent_indices[agent]]
                 for p_idx, (z, idx2) in enumerate(self.piece_state[agent]):
                     if z == "main" and idx2 is not None:
                         steps = (idx2 - start_idx) % self.MAIN_TRACK_LEN
                         self.distance[agent][p_idx] = steps
                         self.pre_capture_steps[agent][p_idx] = steps
+                    elif z in ("home", "finished"):
+                        # Preserve distance for pieces already in home/finished
+                        # They've already passed the main track entry point
+                        continue
                     else:
-                        # For non-main pieces we keep both trackers at zero.
+                        # For yard pieces, reset both trackers to zero
                         self.distance[agent][p_idx] = 0
                         self.pre_capture_steps[agent][p_idx] = 0
                 return True
@@ -1044,7 +1119,7 @@ class raw_env(AECEnv, EzPickle):
         # Render capture markers (one per colour) at the precomputed yard centers
         # when that colour has captured at least one enemy piece.
         for agent in self.agents:
-            if getattr(self, "has_captured", {}).get(agent, False):
+            if self.has_captured.get(agent, False):
                 cx, cy = CAPTURE_MARK_POSITIONS[agent]
                 screen_cx = int(cx * scale)
                 screen_cy = int(cy * scale)
